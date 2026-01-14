@@ -101,7 +101,11 @@ CREATE INDEX IF NOT EXISTS idx_dex_liq_sender ON zigchain.dex_liquidity(sender_a
 CREATE TABLE IF NOT EXISTS zigchain.wrapper_settings (
     denom              TEXT PRIMARY KEY,
     native_client_id   TEXT,
+    counterparty_client_id TEXT,
+    native_port        TEXT,
+    counterparty_port  TEXT,
     native_channel     TEXT,
+    counterparty_channel TEXT,
     decimal_difference INT,
     updated_at_height  BIGINT
 );
