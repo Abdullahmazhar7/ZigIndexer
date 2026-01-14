@@ -471,24 +471,41 @@ export class PostgresSink implements Sink {
         }
 
         if (type.endsWith('.MsgAddLiquidity') || type.endsWith('.MsgRemoveLiquidity')) {
-          dexLiquidityRows.push({
-            tx_hash,
-            msg_index: i,
-            pool_id: m.pool_id,
-            sender_address: m.creator || m.signer || firstSigner,
-            action_type: type.includes('Add') ? 'ADD' : 'REMOVE',
-            amount_0: m.token_0_amount || m.max_token_0,
-            amount_1: m.token_1_amount || m.max_token_1,
-            shares_minted_burned: m.share_amount || m.lp_token_out,
-            block_height: height
-          });
+          let poolId = m.pool_id;
+          if (!poolId && msgLog) {
+            for (const e of msgLog.events) {
+              const pid = findAttr(attrsToPairs(e.attributes), 'pool_id');
+              if (pid) {
+                poolId = pid;
+                break;
+              }
+            }
+          }
+
+          if (poolId) {
+            dexLiquidityRows.push({
+              tx_hash,
+              msg_index: i,
+              pool_id: poolId,
+              sender_address: m.creator || m.signer || firstSigner,
+              action_type: type.includes('Add') ? 'ADD' : 'REMOVE',
+              amount_0: m.base?.amount || m.token_0_amount || m.max_token_0,
+              amount_1: m.quote?.amount || m.token_1_amount || m.max_token_1,
+              shares_minted_burned: m.lptoken?.amount || m.share_amount || m.lp_token_out,
+              block_height: height
+            });
+          }
         }
 
         if (type.endsWith('.MsgUpdateIbcSettings')) {
           wrapperSettingsRows.push({
             denom: m.denom,
             native_client_id: m.native_client_id,
+            counterparty_client_id: m.counterparty_client_id,
+            native_port: m.native_port,
+            counterparty_port: m.counterparty_port,
             native_channel: m.native_channel,
+            counterparty_channel: m.counterparty_channel,
             decimal_difference: m.decimal_difference,
             updated_at_height: height
           });
