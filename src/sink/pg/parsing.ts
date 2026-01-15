@@ -210,6 +210,30 @@ export function parseDec(val: any): string | null {
   return result || '0';
 }
 
+export function toDateFromTimestamp(val: any): Date | null {
+  if (!val) return null;
+  if (val instanceof Date) return val;
+  if (typeof val === 'string') {
+    const d = new Date(val);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof val === 'number') {
+    const ms = val > 1e12 ? val : val * 1000;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const seconds = val?.seconds ?? val?.secs ?? val?.sec;
+  if (seconds !== undefined) {
+    const nanos = val?.nanos ?? val?.nanoseconds ?? 0;
+    const ms = Number(seconds) * 1000 + Math.floor(Number(nanos) / 1e6);
+    if (Number.isFinite(ms)) {
+      const d = new Date(ms);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+  }
+  return null;
+}
+
 /**
  * Tries to parse a value which could be a base64-encoded JSON or already an object.
  * Useful for WASM contract messages.

@@ -5,7 +5,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Sink, SinkConfig } from './types.js';
 import { createPgPool, getPgPool, closePgPool } from '../db/pg.js';
-import { ensureCorePartitions } from '../db/partitions.js';
+import { ensureCorePartitions, ensureIbcPartitions } from '../db/partitions.js';
 import { upsertProgress } from '../db/progress.js';
 import { recordMissingBlock, resolveMissingBlock } from '../db/missing_blocks.js';
 import { getLogger } from '../utils/logger.js';
@@ -22,7 +22,8 @@ import {
   normArray,
   parseDec,
   tryParseJson,
-  toBigIntStr
+  toBigIntStr,
+  toDateFromTimestamp
 } from './pg/parsing.js';
 
 // Standard Flushers
@@ -43,6 +44,10 @@ import { flushGovDeposits, flushGovVotes, upsertGovProposals } from './pg/flushe
 import { upsertValidators } from './pg/flushers/validators.js';
 // ✅ ADDED: IBC Flusher
 import { flushIbcPackets } from './pg/flushers/ibc_packets.js';
+import { flushIbcTransfers } from './pg/flushers/ibc_transfers.js';
+import { flushIbcChannels } from './pg/flushers/ibc_channels.js';
+import { flushAuthzGrants } from './pg/flushers/authz_grants.js';
+import { flushFeeGrants } from './pg/flushers/fee_grants.js';
 
 // ✅ ADDED: Bank & Params Flushers
 import { flushBalanceDeltas } from './pg/flushers/bank.js';
@@ -56,6 +61,13 @@ import { flushZigchainData } from './pg/flushers/zigchain.js';
 const log = getLogger('sink/postgres');
 
 export type PostgresMode = 'block-atomic' | 'batch-insert';
+
+function extractExpiration(val: any): Date | null {
+  const direct = toDateFromTimestamp(val);
+  if (direct) return direct;
+  const nested = val?.expiration ?? val?.basic?.expiration ?? val?.periodic?.expiration ?? val?.allowance?.expiration;
+  return toDateFromTimestamp(nested);
+}
 
 export interface PostgresSinkConfig extends SinkConfig {
   pg: {
@@ -107,6 +119,12 @@ export class PostgresSink implements Sink {
 
   // ✅ IBC Buffer
   private bufIbcPackets: any[] = [];
+  private bufIbcChannels: any[] = [];
+  private bufIbcTransfers: any[] = [];
+
+  // ✅ Authz/Feegrant Buffer
+  private bufAuthzGrants: any[] = [];
+  private bufFeeGrants: any[] = [];
 
   // ✅ ADDED: Missing Buffers
   private bufBalanceDeltas: any[] = [];
@@ -139,6 +157,8 @@ export class PostgresSink implements Sink {
     govProposals: 1000,
     validators: 500,
     ibcPackets: 2000,
+    ibcChannels: 500,
+    ibcTransfers: 2000,
     zigchain: 2000
   };
 
@@ -250,6 +270,12 @@ export class PostgresSink implements Sink {
 
     // ✅ IBC
     const ibcPacketsRows: any[] = [];
+    const ibcChannelsRows: any[] = [];
+    const ibcTransfersRows: any[] = [];
+
+    // ✅ Authz / Feegrant
+    const authzGrantsRows: any[] = [];
+    const feeGrantsRows: any[] = [];
 
     // ✅ Staking & Distribution
     const stakeDelegRows: any[] = [];
@@ -373,6 +399,76 @@ export class PostgresSink implements Sink {
               proposal_type: proposalType,
               submit_time: time,
               status: 'deposit_period',
+            });
+          }
+        }
+
+        // 🟢 AUTHZ / FEEGRANT (SUCCESS ONLY) 🟢
+        if (
+          code === 0 &&
+          (type === '/cosmos.authz.v1beta1.MsgGrant' || type === '/cosmos.authz.v1.MsgGrant')
+        ) {
+          const grant = m?.grant ?? {};
+          const auth = grant?.authorization ?? m?.authorization ?? null;
+          const msgTypeUrl = auth?.msg ?? auth?.msg_type_url ?? auth?.['@type'] ?? auth?.type_url ?? null;
+          if (m?.granter && m?.grantee && msgTypeUrl) {
+            authzGrantsRows.push({
+              granter: m.granter,
+              grantee: m.grantee,
+              msg_type_url: msgTypeUrl,
+              expiration: extractExpiration(grant),
+              height,
+              revoked: false,
+            });
+          }
+        }
+
+        if (
+          code === 0 &&
+          (type === '/cosmos.authz.v1beta1.MsgRevoke' || type === '/cosmos.authz.v1.MsgRevoke')
+        ) {
+          if (m?.granter && m?.grantee && m?.msg_type_url) {
+            authzGrantsRows.push({
+              granter: m.granter,
+              grantee: m.grantee,
+              msg_type_url: m.msg_type_url,
+              expiration: null,
+              height,
+              revoked: true,
+            });
+          }
+        }
+
+        if (
+          code === 0 &&
+          (type === '/cosmos.feegrant.v1beta1.MsgGrantAllowance' || type === '/cosmos.feegrant.v1.MsgGrantAllowance')
+        ) {
+          const allowance = m?.allowance ?? null;
+          if (m?.granter && m?.grantee) {
+            feeGrantsRows.push({
+              granter: m.granter,
+              grantee: m.grantee,
+              allowance,
+              expiration: extractExpiration(allowance),
+              height,
+              revoked: false,
+            });
+          }
+        }
+
+        if (
+          code === 0 &&
+          (type === '/cosmos.feegrant.v1beta1.MsgRevokeAllowance' ||
+            type === '/cosmos.feegrant.v1.MsgRevokeAllowance')
+        ) {
+          if (m?.granter && m?.grantee) {
+            feeGrantsRows.push({
+              granter: m.granter,
+              grantee: m.grantee,
+              allowance: null,
+              expiration: null,
+              height,
+              revoked: true,
             });
           }
         }
@@ -665,6 +761,9 @@ export class PostgresSink implements Sink {
           // 🟢 IBC LOGIC 🟢
           if (['send_packet', 'recv_packet', 'acknowledge_packet', 'timeout_packet'].includes(event_type)) {
             const sequenceStr = findAttr(attrsPairs, 'packet_sequence');
+            if (!sequenceStr || !/^\d+$/.test(sequenceStr)) {
+              continue;
+            }
             const sequence = toBigIntStr(sequenceStr);
             const srcPort = findAttr(attrsPairs, 'packet_src_port');
             const srcChan = findAttr(attrsPairs, 'packet_src_channel');
@@ -686,18 +785,32 @@ export class PostgresSink implements Sink {
 
               try {
                 if (dataJson) {
-                  const d = JSON.parse(dataJson);
+                  let decoded = dataJson;
+                  try {
+                    const maybe = Buffer.from(dataJson, 'base64').toString('utf8');
+                    if (maybe.trim().startsWith('{') || maybe.trim().startsWith('[')) {
+                      decoded = maybe;
+                    }
+                  } catch {
+                    /* ignore base64 decode error */
+                  }
+                  const d = JSON.parse(decoded);
                   amount = d.amount ?? null;
                   denom = d.denom ?? null;
                   sender = d.sender ?? null;
                   receiver = d.receiver ?? null;
                   memo = d.memo ?? null;
-                  // Relayer is typically the sender for send_packet, receiver for recv_packet
-                  relayer = event_type === 'send_packet' ? sender :
-                    event_type === 'recv_packet' ? receiver :
-                      findAttr(attrsPairs, 'packet_ack_relayer') ?? sender;
                 }
               } catch { /* ignore parse error */ }
+
+              if (!relayer) {
+                const ackRelayer = findAttr(attrsPairs, 'packet_ack_relayer') || findAttr(attrsPairs, 'relayer');
+                const attrSender = findAttr(attrsPairs, 'packet_sender') || findAttr(attrsPairs, 'sender');
+                const attrReceiver = findAttr(attrsPairs, 'packet_receiver') || findAttr(attrsPairs, 'receiver');
+                relayer = event_type === 'send_packet' ? (sender ?? attrSender) :
+                  event_type === 'recv_packet' ? (receiver ?? attrReceiver) :
+                    ackRelayer ?? sender ?? attrSender ?? receiver ?? attrReceiver;
+              }
 
               const statusMap: Record<string, string> = {
                 send_packet: 'sent',
@@ -725,6 +838,49 @@ export class PostgresSink implements Sink {
                 denom,
                 amount,
                 memo
+              });
+
+              if (denom && amount && (sender || receiver)) {
+                ibcTransfersRows.push({
+                  port_id_src: srcPort,
+                  channel_id_src: srcChan,
+                  sequence: sequence,
+                  port_id_dst: dstPort,
+                  channel_id_dst: dstChan,
+                  sender,
+                  receiver,
+                  denom,
+                  amount,
+                  memo,
+                  timeout_height: timeoutHeightStr ?? null,
+                  timeout_ts: timeoutTsStr ?? null,
+                  status: statusMap[event_type] || 'failed',
+                  tx_hash_send: event_type === 'send_packet' ? tx_hash : null,
+                  height_send: event_type === 'send_packet' ? height : null,
+                  tx_hash_recv: event_type === 'recv_packet' ? tx_hash : null,
+                  height_recv: event_type === 'recv_packet' ? height : null,
+                  tx_hash_ack: event_type === 'acknowledge_packet' ? tx_hash : null,
+                  height_ack: event_type === 'acknowledge_packet' ? height : null,
+                  relayer
+                });
+              }
+            }
+          }
+
+          if (event_type.startsWith('channel_open_') || event_type.startsWith('channel_close_')) {
+            const portId = findAttr(attrsPairs, 'port_id') || findAttr(attrsPairs, 'packet_src_port');
+            const channelId = findAttr(attrsPairs, 'channel_id') || findAttr(attrsPairs, 'packet_src_channel');
+            if (portId && channelId) {
+              const connectionId = findAttr(attrsPairs, 'connection_id');
+              ibcChannelsRows.push({
+                port_id: portId,
+                channel_id: channelId,
+                state: event_type,
+                ordering: findAttr(attrsPairs, 'channel_ordering') || findAttr(attrsPairs, 'ordering'),
+                connection_hops: connectionId ? [connectionId] : null,
+                counterparty_port: findAttr(attrsPairs, 'counterparty_port_id'),
+                counterparty_channel: findAttr(attrsPairs, 'counterparty_channel_id'),
+                version: findAttr(attrsPairs, 'version')
               });
             }
           }
@@ -775,6 +931,10 @@ export class PostgresSink implements Sink {
       stakeDelegRows, stakeDistrRows, // 👈 Returning Staking Data
       validatorsRows, // 👈 Returning Validator Data
       ibcPacketsRows, // 👈 Returning IBC Data
+      ibcChannelsRows,
+      ibcTransfersRows,
+      authzGrantsRows,
+      feeGrantsRows,
       factoryDenomsRows, dexPoolsRows, dexSwapsRows, dexLiquidityRows, wrapperSettingsRows,
       balanceDeltasRows, wasmCodesRows, wasmContractsRows, wasmMigrationsRows, networkParamsRows,
       wasmEventAttrsRows,
@@ -825,6 +985,12 @@ export class PostgresSink implements Sink {
 
     // ✅ IBC (Pushing to Buffer)
     this.bufIbcPackets.push(...data.ibcPacketsRows);
+    this.bufIbcChannels.push(...data.ibcChannelsRows);
+    this.bufIbcTransfers.push(...data.ibcTransfersRows);
+
+    // ✅ Authz / Feegrant (Pushing to Buffer)
+    this.bufAuthzGrants.push(...data.authzGrantsRows);
+    this.bufFeeGrants.push(...data.feeGrantsRows);
 
     const zCount = this.bufFactoryDenoms.length + this.bufDexPools.length + this.bufDexSwaps.length + this.bufDexLiquidity.length;
     const gCount = this.bufGovVotes.length + this.bufGovDeposits.length;
@@ -872,6 +1038,10 @@ export class PostgresSink implements Sink {
       await flushGovDeposits(client, this.bufGovDeposits); this.bufGovDeposits = [];
       await upsertGovProposals(client, this.bufGovProposals); this.bufGovProposals = [];
 
+      // ✅ Flushing Authz/Feegrant Data
+      await flushAuthzGrants(client, this.bufAuthzGrants); this.bufAuthzGrants = [];
+      await flushFeeGrants(client, this.bufFeeGrants); this.bufFeeGrants = [];
+
       // ✅ Flushing Staking Data
       await flushStakeDeleg(client, this.bufStakeDeleg); this.bufStakeDeleg = [];
       await flushStakeDistr(client, this.bufStakeDistr); this.bufStakeDistr = [];
@@ -880,7 +1050,19 @@ export class PostgresSink implements Sink {
       await upsertValidators(client, this.bufValidators); this.bufValidators = [];
 
       // ✅ Flushing IBC Data
+      if (this.bufIbcPackets.length > 0) {
+        const seqs = [...this.bufIbcPackets, ...this.bufIbcTransfers]
+          .map((r: any) => Number(r.sequence))
+          .filter((n: number) => Number.isFinite(n));
+        if (seqs.length > 0) {
+          const minSeq = Math.min(...seqs);
+          const maxSeq = Math.max(...seqs);
+          await ensureIbcPartitions(client, minSeq, maxSeq);
+        }
+      }
       await flushIbcPackets(client, this.bufIbcPackets); this.bufIbcPackets = [];
+      await flushIbcChannels(client, this.bufIbcChannels); this.bufIbcChannels = [];
+      await flushIbcTransfers(client, this.bufIbcTransfers); this.bufIbcTransfers = [];
 
       // ✅ ADDED: New Flushers
       if (this.bufBalanceDeltas.length > 0) {

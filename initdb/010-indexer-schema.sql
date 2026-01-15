@@ -281,6 +281,31 @@ CREATE TABLE ibc.packets (
 ) PARTITION BY RANGE (sequence);
 CREATE TABLE IF NOT EXISTS ibc.packets_p0 PARTITION OF ibc.packets FOR VALUES FROM (0) TO (1000000);
 
+CREATE TABLE ibc.transfers (
+    port_id_src      TEXT NOT NULL,
+    channel_id_src   TEXT NOT NULL,
+    sequence         BIGINT NOT NULL,
+    port_id_dst      TEXT NULL,
+    channel_id_dst   TEXT NULL,
+    sender           TEXT NULL,
+    receiver         TEXT NULL,
+    denom            TEXT NULL,
+    amount           NUMERIC(80, 0) NULL,
+    memo             TEXT NULL,
+    timeout_height   TEXT NULL,
+    timeout_ts       TEXT NULL,
+    status           ibc_packet_status NOT NULL,
+    tx_hash_send     TEXT NULL,
+    height_send      BIGINT NULL,
+    tx_hash_recv     TEXT NULL,
+    height_recv      BIGINT NULL,
+    tx_hash_ack      TEXT NULL,
+    height_ack       BIGINT NULL,
+    relayer          TEXT NULL,
+    PRIMARY KEY (channel_id_src, port_id_src, sequence)
+) PARTITION BY RANGE (sequence);
+CREATE TABLE IF NOT EXISTS ibc.transfers_p0 PARTITION OF ibc.transfers FOR VALUES FROM (0) TO (1000000);
+
 -- ============================================================================
 -- 6) WASM
 -- ============================================================================
@@ -361,7 +386,35 @@ CREATE TABLE wasm.state_kv (
 ) PARTITION BY RANGE (height);
 
 -- ============================================================================
--- 7) NETWORK PARAMS
+-- 7) AUTHZ / FEEGRANT
+-- ============================================================================
+CREATE TABLE authz_feegrant.authz_grants (
+    granter      TEXT        NOT NULL,
+    grantee      TEXT        NOT NULL,
+    msg_type_url TEXT        NOT NULL,
+    expiration   TIMESTAMPTZ NULL,
+    height       BIGINT      NOT NULL,
+    revoked      BOOLEAN     NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (granter, grantee, msg_type_url, height)
+) PARTITION BY RANGE (height);
+CREATE TABLE IF NOT EXISTS authz_feegrant.authz_grants_p0 PARTITION OF authz_feegrant.authz_grants FOR VALUES FROM (0) TO (1000000);
+
+CREATE TABLE authz_feegrant.fee_grants (
+    granter    TEXT        NOT NULL,
+    grantee    TEXT        NOT NULL,
+    allowance  JSONB       NULL,
+    expiration TIMESTAMPTZ NULL,
+    height     BIGINT      NOT NULL,
+    revoked    BOOLEAN     NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (granter, grantee, height)
+) PARTITION BY RANGE (height);
+CREATE TABLE IF NOT EXISTS authz_feegrant.fee_grants_p0 PARTITION OF authz_feegrant.fee_grants FOR VALUES FROM (0) TO (1000000);
+
+CREATE INDEX IF NOT EXISTS idx_authz_grants_grantee ON authz_feegrant.authz_grants (grantee, height DESC);
+CREATE INDEX IF NOT EXISTS idx_fee_grants_grantee ON authz_feegrant.fee_grants (grantee, height DESC);
+
+-- ============================================================================
+-- 8) NETWORK PARAMS
 -- ============================================================================
 CREATE TABLE core.network_params (
     height    BIGINT PRIMARY KEY,
@@ -373,7 +426,7 @@ CREATE TABLE core.network_params (
 ) PARTITION BY RANGE (height);
 
 -- ============================================================================
--- 8) QUERY-PATTERN INDEXES (For 5.4M+ scale)
+-- 9) QUERY-PATTERN INDEXES (For 5.4M+ scale)
 -- ============================================================================
 -- Transfers by address (common API query)
 CREATE INDEX IF NOT EXISTS idx_transfers_from ON bank.transfers (from_addr, height DESC);
@@ -394,6 +447,9 @@ CREATE INDEX IF NOT EXISTS idx_wasm_event_attrs_contract ON wasm.event_attrs (co
 
 -- IBC by channel (relayer/bridge queries)
 CREATE INDEX IF NOT EXISTS idx_ibc_channel ON ibc.packets (channel_id_src, status);
+CREATE INDEX IF NOT EXISTS idx_ibc_transfers_sender ON ibc.transfers (sender, sequence DESC);
+CREATE INDEX IF NOT EXISTS idx_ibc_transfers_receiver ON ibc.transfers (receiver, sequence DESC);
+CREATE INDEX IF NOT EXISTS idx_ibc_transfers_denom ON ibc.transfers (denom, sequence DESC);
 
 -- Gov by proposal (governance dashboard)
 CREATE INDEX IF NOT EXISTS idx_gov_votes_proposal ON gov.votes (proposal_id, height DESC);

@@ -50,11 +50,20 @@ export async function insertIbcPackets(client: PoolClient, rows: any[]): Promise
     finalRows,
     `ON CONFLICT (channel_id_src, port_id_src, sequence) DO UPDATE SET
        status = EXCLUDED.status,
+       port_id_dst = COALESCE(ibc.packets.port_id_dst, EXCLUDED.port_id_dst),
+       channel_id_dst = COALESCE(ibc.packets.channel_id_dst, EXCLUDED.channel_id_dst),
+       timeout_height = COALESCE(ibc.packets.timeout_height, EXCLUDED.timeout_height),
+       timeout_ts = COALESCE(ibc.packets.timeout_ts, EXCLUDED.timeout_ts),
+       tx_hash_send = COALESCE(ibc.packets.tx_hash_send, EXCLUDED.tx_hash_send),
+       height_send = COALESCE(ibc.packets.height_send, EXCLUDED.height_send),
        tx_hash_recv = COALESCE(ibc.packets.tx_hash_recv, EXCLUDED.tx_hash_recv),
        height_recv = COALESCE(ibc.packets.height_recv, EXCLUDED.height_recv),
        tx_hash_ack = COALESCE(ibc.packets.tx_hash_ack, EXCLUDED.tx_hash_ack),
        height_ack = COALESCE(ibc.packets.height_ack, EXCLUDED.height_ack),
-       relayer = COALESCE(ibc.packets.relayer, EXCLUDED.relayer)
+       relayer = COALESCE(ibc.packets.relayer, EXCLUDED.relayer),
+       denom = COALESCE(ibc.packets.denom, EXCLUDED.denom),
+       amount = COALESCE(ibc.packets.amount, EXCLUDED.amount),
+       memo = COALESCE(ibc.packets.memo, EXCLUDED.memo)
     `
   );
   await client.query(text, values);

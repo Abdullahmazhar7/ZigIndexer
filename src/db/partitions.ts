@@ -21,8 +21,8 @@ export async function ensureCorePartitions(client: PoolClient, minHeight: number
     ['bank', 'transfers'], ['bank', 'balance_deltas'],
     ['stake', 'delegation_events'], ['stake', 'distribution_events'],
     ['gov', 'deposits'], ['gov', 'votes'],
+    ['authz_feegrant', 'authz_grants'], ['authz_feegrant', 'fee_grants'],
     ['wasm', 'executions'], ['wasm', 'events'], ['wasm', 'event_attrs'], ['wasm', 'state_kv'], ['wasm', 'contract_migrations'],
-    ['ibc', 'packets'], // Note: Uses sequence, but handled by height proxy here for simplicity
 
     // Zigchain
     ['zigchain', 'dex_swaps'], ['zigchain', 'dex_liquidity']
@@ -57,6 +57,21 @@ export async function ensureCorePartitions(client: PoolClient, minHeight: number
     throw err;
   } finally {
     // 🔓 Unlock
+    await client.query(`SELECT pg_advisory_unlock($1)`, [PARTITION_LOCK_ID]);
+  }
+}
+
+export async function ensureIbcPartitions(client: PoolClient, minSeq: number, maxSeq: number): Promise<void> {
+  await client.query(`SELECT pg_advisory_lock($1)`, [PARTITION_LOCK_ID]);
+  try {
+    await client.query(`SELECT util.ensure_partition_for_height($1, $2, $3)`, ['ibc', 'packets', minSeq]);
+    await client.query(`SELECT util.ensure_partition_for_height($1, $2, $3)`, ['ibc', 'transfers', minSeq]);
+    const rangeSize = 1_000_000;
+    if (Math.floor(minSeq / rangeSize) !== Math.floor(maxSeq / rangeSize)) {
+      await client.query(`SELECT util.ensure_partition_for_height($1, $2, $3)`, ['ibc', 'packets', maxSeq]);
+      await client.query(`SELECT util.ensure_partition_for_height($1, $2, $3)`, ['ibc', 'transfers', maxSeq]);
+    }
+  } finally {
     await client.query(`SELECT pg_advisory_unlock($1)`, [PARTITION_LOCK_ID]);
   }
 }
