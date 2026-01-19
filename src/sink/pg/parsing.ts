@@ -311,3 +311,30 @@ export function toBigIntStr(val: any): string {
   const s = String(val).replace(/\D/g, '');
   return s.length > 0 ? s : '0';
 }
+
+/**
+ * Decodes a hex-encoded string to a JSON object.
+ * Used for IBC packet_data_hex which contains hex-encoded FungibleTokenPacketData.
+ * @param hex - The hex string to decode.
+ * @returns Parsed JSON object or null if decoding fails.
+ */
+export function decodeHexToJson(hex: string | null | undefined): any | null {
+  if (!hex || typeof hex !== 'string') return null;
+  try {
+    // Remove 0x prefix if present
+    const cleanHex = hex.startsWith('0x') ? hex.slice(2) : hex;
+    // Validate hex string
+    if (!/^[a-fA-F0-9]*$/.test(cleanHex)) return null;
+    // Decode hex to UTF-8 string
+    const decoded = Buffer.from(cleanHex, 'hex').toString('utf8');
+    // Try to parse as JSON
+    const trimmed = decoded.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      return JSON.parse(trimmed);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+

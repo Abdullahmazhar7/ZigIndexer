@@ -22,7 +22,7 @@ INSERT INTO util.height_part_ranges (schema_name, table_name, range_size) VALUES
  ('tokens', 'cw20_transfers', 1000000),
  ('wasm', 'executions', 1000000), ('wasm', 'events', 1000000),
  ('wasm', 'event_attrs', 1000000), ('wasm', 'state_kv', 1000000), ('wasm', 'contract_migrations', 1000000),
- ('ibc', 'packets', 1000000), ('ibc', 'transfers', 1000000),
+ -- IBC: No longer partitioned (lifecycle merging requires simple PK)
  ('zigchain', 'dex_swaps', 1000000), ('zigchain', 'dex_liquidity', 1000000)
 ON CONFLICT (schema_name, table_name) DO UPDATE SET range_size = EXCLUDED.range_size;
 
@@ -39,7 +39,6 @@ WHERE (schema_name, table_name) NOT IN (
     ('tokens', 'cw20_transfers'),
     ('wasm', 'executions'), ('wasm', 'events'), ('wasm', 'event_attrs'),
     ('wasm', 'state_kv'), ('wasm', 'contract_migrations'),
-    ('ibc', 'packets'), ('ibc', 'transfers'),
     ('zigchain', 'dex_swaps'), ('zigchain', 'dex_liquidity')
 );
 
