@@ -64,6 +64,9 @@ import { flushWasmAdminChanges } from './pg/flushers/wasm_admin_changes.js';
 // ✅ Zigchain Flusher
 import { flushZigchainData } from './pg/flushers/zigchain.js';
 
+// ✅ WASM DEX Swap Analytics
+import { flushWasmSwaps, flushFactoryTokens } from './pg/flushers/wasm_swaps.js';
+
 const log = getLogger('sink/postgres');
 
 export type PostgresMode = 'block-atomic' | 'batch-insert';
@@ -150,6 +153,10 @@ export class PostgresSink implements Sink {
   private bufDexLiquidity: any[] = [];
   private bufWrapperSettings: any[] = [];
   private bufCw20Transfers: any[] = [];
+
+  // ✅ WASM DEX Swap Analytics
+  private bufWasmSwaps: any[] = [];
+  private bufFactoryTokens: any[] = [];
 
   private batchSizes = {
     blocks: 1000,
@@ -306,6 +313,10 @@ export class PostgresSink implements Sink {
     const wasmMigrationsRows: any[] = [];
     const wasmAdminChangesRows: any[] = [];
     const networkParamsRows: any[] = [];
+
+    // ✅ WASM DEX Swaps Analytics
+    const wasmSwapsRows: any[] = [];
+    const factoryTokensRows: any[] = [];
 
     const txs = Array.isArray(blockLine?.txs) ? blockLine.txs : [];
 
@@ -817,12 +828,26 @@ export class PostgresSink implements Sink {
                 });
               }
 
+              // ✅ ENHANCED CW20 DETECTION (Multiple patterns)
               const action = findAttr(attrsPairs, 'action');
-              if (action === 'transfer' || action === 'send') {
+              const method = findAttr(attrsPairs, 'method');
+
+              // Pattern 1: action=transfer/send (standard CW20)
+              // Pattern 2: method=transfer/send (some CW20 variants)
+              // Pattern 3: Heuristic - from/to/amount without action (non-standard)
+              const hasFromTo = findAttr(attrsPairs, 'from') && findAttr(attrsPairs, 'to');
+              const isCw20Transfer =
+                action === 'transfer' || action === 'send' ||
+                action === 'transfer_from' || action === 'send_from' ||
+                method === 'transfer' || method === 'send' ||
+                (!action && !method && hasFromTo && findAttr(attrsPairs, 'amount'));
+
+              if (isCw20Transfer) {
                 const fromAddr =
                   findAttr(attrsPairs, 'sender') ||
                   findAttr(attrsPairs, 'from') ||
-                  findAttr(attrsPairs, 'from_address');
+                  findAttr(attrsPairs, 'from_address') ||
+                  findAttr(attrsPairs, 'owner'); // For transfer_from
                 const toAddr =
                   findAttr(attrsPairs, 'recipient') ||
                   findAttr(attrsPairs, 'to') ||
@@ -839,6 +864,63 @@ export class PostgresSink implements Sink {
                     height,
                     tx_hash
                   });
+                }
+              }
+
+              // ✅ WASM DEX SWAP EXTRACTION (Astroport/TerraSwap style)
+              if (action === 'swap') {
+                const sender = findAttr(attrsPairs, 'sender');
+                const receiver = findAttr(attrsPairs, 'receiver') || sender;
+                const offerAsset = findAttr(attrsPairs, 'offer_asset');
+                const askAsset = findAttr(attrsPairs, 'ask_asset');
+                const offerAmount = findAttr(attrsPairs, 'offer_amount');
+                const returnAmount = findAttr(attrsPairs, 'return_amount');
+                const spreadAmount = findAttr(attrsPairs, 'spread_amount');
+                const commissionAmount = findAttr(attrsPairs, 'commission_amount');
+                const makerFeeAmount = findAttr(attrsPairs, 'maker_fee_amount');
+                const feeShareAmount = findAttr(attrsPairs, 'fee_share_amount');
+                const reserves = findAttr(attrsPairs, 'reserves');
+
+                if (sender && offerAmount) {
+                  wasmSwapsRows.push({
+                    tx_hash,
+                    msg_index,
+                    event_index: ei,
+                    contract,
+                    sender,
+                    receiver,
+                    offer_asset: offerAsset,
+                    ask_asset: askAsset,
+                    offer_amount: offerAmount,
+                    return_amount: returnAmount,
+                    spread_amount: spreadAmount,
+                    commission_amount: commissionAmount,
+                    maker_fee_amount: makerFeeAmount,
+                    fee_share_amount: feeShareAmount,
+                    reserves,
+                    block_height: height,
+                    timestamp: time
+                  });
+
+                  // ✅ Track factory tokens discovered in swaps
+                  for (const denom of [offerAsset, askAsset]) {
+                    if (denom && denom.startsWith('coin.zig')) {
+                      // Parse factory token format: coin.zigCREATOR.SYMBOL
+                      const parts = denom.split('.');
+                      if (parts.length >= 3) {
+                        const creator = parts[1]; // e.g., "zig109f7g2rzl2aqee7z6gffn8kfe9cpqx0mjkk7ethmx8m2hq4xpe9snmaam2"
+                        const symbol = parts.slice(2).join('.'); // e.g., "stzig"
+                        factoryTokensRows.push({
+                          denom,
+                          base_denom: symbol,
+                          creator,
+                          symbol,
+                          first_seen_height: height,
+                          first_seen_tx: tx_hash
+                        });
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -1210,6 +1292,7 @@ export class PostgresSink implements Sink {
       factoryDenomsRows, dexPoolsRows, dexSwapsRows, dexLiquidityRows, wrapperSettingsRows,
       balanceDeltasRows, wasmCodesRows, wasmContractsRows, wasmMigrationsRows, wasmAdminChangesRows, networkParamsRows,
       wasmEventAttrsRows,
+      wasmSwapsRows, factoryTokensRows, // ✅ WASM DEX Swaps Analytics
       height
     };
   }
@@ -1270,6 +1353,10 @@ export class PostgresSink implements Sink {
 
     // ✅ Tokens (CW20) (Pushing to Buffer)
     this.bufCw20Transfers.push(...data.cw20TransfersRows);
+
+    // ✅ WASM DEX Swaps Analytics (Pushing to Buffer)
+    this.bufWasmSwaps.push(...data.wasmSwapsRows);
+    this.bufFactoryTokens.push(...data.factoryTokensRows);
 
     const zCount = this.bufFactoryDenoms.length + this.bufDexPools.length + this.bufDexSwaps.length + this.bufDexLiquidity.length;
     const gCount = this.bufGovVotes.length + this.bufGovDeposits.length;
@@ -1366,6 +1453,14 @@ export class PostgresSink implements Sink {
       }
       if (this.bufNetworkParams.length > 0) {
         await flushNetworkParams(client, this.bufNetworkParams); this.bufNetworkParams = [];
+      }
+
+      // ✅ WASM DEX Swaps Analytics
+      if (this.bufWasmSwaps.length > 0) {
+        await flushWasmSwaps(client, this.bufWasmSwaps); this.bufWasmSwaps = [];
+      }
+      if (this.bufFactoryTokens.length > 0) {
+        await flushFactoryTokens(client, this.bufFactoryTokens); this.bufFactoryTokens = [];
       }
 
       // 3. Zigchain

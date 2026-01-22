@@ -1,10 +1,24 @@
+# PostgreSQL data directory
+pg-data
+pg-data/
+
+# Node modules (container has its own)
 node_modules
-npm-debug.log
-Dockerfile
-.dockerignore
+
+# Git
 .git
-.vscode
+.gitignore
+
+# Environment files
 .env
+
+# IDE
+.vscode
+.idea
+
+# Build artifacts
 dist
-build
-.DS_Store
+out
+
+# Logs
+*.log
