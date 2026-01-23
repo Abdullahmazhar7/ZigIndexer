@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { makeMultiInsert } from '../batch.js';
+import { execBatchedInsert } from '../batch.js';
 
 // ✅ Maximum size for individual attribute values (4KB safe for indexing)
 const MAX_ATTR_VALUE_SIZE = 4000;
@@ -37,13 +37,12 @@ export async function insertEvents(client: PoolClient, rows: any[]): Promise<voi
         attributes: JSON.stringify(sanitizeAttributes(r.attributes))
     }));
 
-    const { text, values } = makeMultiInsert(
+    await execBatchedInsert(
+        client,
         'core.events',
         cols,
         safeRows,
         'ON CONFLICT (tx_hash, msg_index, event_index) DO NOTHING',
         { attributes: 'jsonb' }
     );
-    await client.query(text, values);
 }
-

@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { makeMultiInsert } from '../batch.js';
+import { execBatchedInsert } from '../batch.js';
 
 /**
  * Insert WASM swap events from CosmWasm AMM contracts (e.g., Astroport-style).
@@ -34,14 +34,13 @@ export async function insertWasmSwaps(client: PoolClient, rows: any[]): Promise<
 
 
 
-    const { text, values } = makeMultiInsert(
+    await execBatchedInsert(
+        client,
         'wasm.dex_swaps',
         cols,
         rows,
         'ON CONFLICT (tx_hash, msg_index, event_index, block_height) DO NOTHING'
     );
-
-    await client.query(text, values);
 }
 
 /**
@@ -59,12 +58,11 @@ export async function insertFactoryTokens(client: PoolClient, rows: any[]): Prom
         'first_seen_tx'
     ];
 
-    const { text, values } = makeMultiInsert(
+    await execBatchedInsert(
+        client,
         'tokens.factory_tokens',
         cols,
         rows,
         'ON CONFLICT (denom) DO NOTHING'
     );
-
-    await client.query(text, values);
 }

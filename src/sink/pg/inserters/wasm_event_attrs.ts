@@ -1,15 +1,16 @@
 import type { PoolClient } from 'pg';
-import { makeMultiInsert } from '../batch.js';
+import { execBatchedInsert } from '../batch.js';
 
 export async function insertWasmEventAttrs(client: PoolClient, rows: any[]): Promise<void> {
-  if (!rows?.length) return;
+    if (!rows?.length) return;
 
-  const cols = ['contract', 'height', 'tx_hash', 'msg_index', 'event_index', 'attr_index', 'key', 'value'];
-  const { text, values } = makeMultiInsert(
-    'wasm.event_attrs',
-    cols,
-    rows,
-    'ON CONFLICT (height, tx_hash, msg_index, event_index, attr_index) DO NOTHING'
-  );
-  await client.query(text, values);
+    const cols = ['contract', 'height', 'tx_hash', 'msg_index', 'event_index', 'attr_index', 'key', 'value'];
+
+    await execBatchedInsert(
+        client,
+        'wasm.event_attrs',
+        cols,
+        rows,
+        'ON CONFLICT (height, tx_hash, msg_index, event_index, attr_index) DO NOTHING'
+    );
 }

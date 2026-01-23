@@ -67,8 +67,14 @@ import { flushZigchainData } from './pg/flushers/zigchain.js';
 // ✅ WASM DEX Swap Analytics
 import { flushWasmSwaps, flushFactoryTokens } from './pg/flushers/wasm_swaps.js';
 
+// ✅ Specialized WASM Analytics
+import { flushWasmAnalytics } from './pg/flushers/wasm_analytics.js';
+
 // ✅ Unknown Messages Quarantine
 import { flushUnknownMessages } from './pg/flushers/unknown_msgs.js';
+
+// ✅ Zigchain Factory Supply Tracking
+import { flushFactorySupplyEvents } from './pg/flushers/factory_supply.js';
 
 const log = getLogger('sink/postgres');
 
@@ -160,9 +166,17 @@ export class PostgresSink implements Sink {
   // ✅ WASM DEX Swap Analytics
   private bufWasmSwaps: any[] = [];
   private bufFactoryTokens: any[] = [];
+  private bufWrapperEvents: any[] = [];
+
+  // ✅ Specialized WASM Analytics
+  private bufWasmOracleUpdates: any[] = [];
+  private bufWasmTokenEvents: any[] = [];
 
   // ✅ Unknown Messages Quarantine
   private bufUnknownMsgs: any[] = [];
+
+  // ✅ Zigchain Factory Supply Tracking
+  private bufFactorySupplyEvents: any[] = [];
 
   private batchSizes = {
     blocks: 1000,
@@ -260,9 +274,9 @@ export class PostgresSink implements Sink {
       time,
       proposer_address: b?.block?.header?.proposer_address ?? null,
       tx_count: Array.isArray(blockLine?.txs) ? blockLine.txs.length : 0,
-      size_bytes: b?.block?.size ?? null,
-      last_commit_hash: b?.block?.last_commit?.block_id?.hash ?? null,
-      data_hash: b?.block?.data?.hash ?? null,
+      size_bytes: b?.block_size ?? b?.block?.size ?? null,
+      last_commit_hash: b?.block?.header?.last_commit_hash ?? b?.block?.last_commit?.block_id?.hash ?? null,
+      data_hash: b?.block?.header?.data_hash ?? null,
       evidence_count: Array.isArray(b?.block?.evidence?.evidence) ? b.block.evidence.evidence.length : 0,
       app_hash: b?.block?.header?.app_hash ?? null,
     };
@@ -326,6 +340,10 @@ export class PostgresSink implements Sink {
 
     // ✅ Unknown Messages Quarantine
     const unknownMsgsRows: any[] = [];
+    const factorySupplyEventsRows: any[] = [];
+    const wrapperEventsRows: any[] = [];
+    const wasmOracleUpdatesRows: any[] = [];
+    const wasmTokenEventsRows: any[] = [];
 
     const txs = Array.isArray(blockLine?.txs) ? blockLine.txs : [];
 
@@ -592,6 +610,75 @@ export class PostgresSink implements Sink {
           });
         }
 
+        if (type.endsWith('.MsgMintAndSendTokens') || type.endsWith('.MsgBurnTokens')) {
+          const denom = m.token?.denom || m.amount?.denom || m.denom;
+          if (denom) {
+            factorySupplyEventsRows.push({
+              height,
+              tx_hash,
+              msg_index: i,
+              denom,
+              action: type.endsWith('.MsgMintAndSendTokens') ? 'mint' : 'burn',
+              amount: m.token?.amount || m.amount?.amount || m.amount || null,
+              sender: m.signer || m.sender || m.creator,
+              recipient: m.recipient || null,
+              metadata: null
+            });
+          }
+        }
+
+        if (type.endsWith('.MsgSetDenomMetadata')) {
+          if (m.metadata?.base) {
+            factorySupplyEventsRows.push({
+              height,
+              tx_hash,
+              msg_index: i,
+              denom: m.metadata.base,
+              action: 'set_metadata',
+              amount: null,
+              sender: m.signer || m.sender || m.creator,
+              recipient: null,
+              metadata: m.metadata
+            });
+          }
+        }
+
+        if (type.endsWith('.MsgFundModuleWallet') || type.endsWith('.MsgWithdrawFromModuleWallet')) {
+          const coins = Array.isArray(m.amount) ? m.amount : (m.amount ? [m.amount] : []);
+          for (const coin of coins) {
+            wrapperEventsRows.push({
+              height,
+              tx_hash,
+              msg_index: i,
+              sender: m.signer || m.sender,
+              action: type.endsWith('.MsgFundModuleWallet') ? 'fund_module' : 'withdraw_module',
+              amount: coin?.amount || null,
+              denom: coin?.denom || null,
+              metadata: null
+            });
+          }
+        }
+
+        if (type.endsWith('.MsgUpdateIbcSettings')) {
+          wrapperEventsRows.push({
+            height,
+            tx_hash,
+            msg_index: i,
+            sender: m.sender,
+            action: 'update_ibc_settings',
+            amount: null,
+            denom: null,
+            metadata: {
+              native_client_id: m.native_client_id,
+              counterparty_client_id: m.counterparty_client_id,
+              native_port: m.native_port,
+              counterparty_port: m.counterparty_port,
+              native_channel: m.native_channel,
+              counterparty_channel: m.counterparty_channel
+            }
+          });
+        }
+
         if (type.endsWith('.MsgCreatePool')) {
           let poolId = null;
           let lpToken = null;
@@ -633,6 +720,19 @@ export class PostgresSink implements Sink {
         }
 
         if (type.endsWith('.MsgSwapExactIn') || type.endsWith('.MsgSwapExactOut') || type.endsWith('.MsgSwap')) {
+          let priceImpact = null;
+          // Try to extract price_impact from event or calculate from amounts
+          if (msgLog) {
+            for (const e of msgLog.events) {
+              const pairs = attrsToPairs(e.attributes);
+              const pi = findAttr(pairs, 'price_impact');
+              if (pi) {
+                priceImpact = pi;
+                break;
+              }
+            }
+          }
+
           dexSwapsRows.push({
             tx_hash,
             msg_index: i,
@@ -642,6 +742,7 @@ export class PostgresSink implements Sink {
             token_in_amount: m.incoming?.amount || m.incoming_max?.amount,
             token_out_denom: m.outgoing?.denom || m.outgoing_min?.denom,
             token_out_amount: m.outgoing?.amount || m.outgoing_min?.amount,
+            price_impact: priceImpact,
             block_height: height
           });
         }
@@ -1303,6 +1404,33 @@ export class PostgresSink implements Sink {
             }
           }
 
+          // ✅ Phase 3: Specialized WASM Analytics Dispatcher
+          if (event_type === 'wasm-temporal_numeric_value_update') {
+            const contract = findAttr(attrsPairs, 'contract') || findAttr(attrsPairs, '_contract_address');
+            const key = findAttr(attrsPairs, 'key');
+            const value = findAttr(attrsPairs, 'value');
+            if (contract && key && value) {
+              wasmOracleUpdatesRows.push({
+                height, tx_hash, msg_index, contract, key,
+                value: parseFloat(value) || null
+              });
+            }
+          }
+
+          if (event_type === 'wasm-token_minted' || event_type === 'wasm-token_burned') {
+            const contract = findAttr(attrsPairs, 'contract') || findAttr(attrsPairs, '_contract_address');
+            const amount = findAttr(attrsPairs, 'amount');
+            if (contract && amount) {
+              wasmTokenEventsRows.push({
+                height, tx_hash, msg_index, contract,
+                action: event_type.includes('mint') ? 'mint' : 'burn',
+                amount,
+                recipient: findAttr(attrsPairs, 'recipient'),
+                sender: findAttr(attrsPairs, 'sender')
+              });
+            }
+          }
+
           for (const { key, value } of attrsPairs) {
             attrRows.push({ tx_hash, msg_index, event_index: ei, key, value, height });
           }
@@ -1349,11 +1477,14 @@ export class PostgresSink implements Sink {
       authzGrantsRows,
       feeGrantsRows,
       cw20TransfersRows,
-      factoryDenomsRows, dexPoolsRows, dexSwapsRows, dexLiquidityRows, wrapperSettingsRows,
+      factoryDenomsRows, dexPoolsRows, dexSwapsRows, dexLiquidityRows, wrapperSettingsRows, wrapperEventsRows,
       balanceDeltasRows, wasmCodesRows, wasmContractsRows, wasmMigrationsRows, wasmAdminChangesRows, networkParamsRows,
       wasmEventAttrsRows,
       wasmSwapsRows, factoryTokensRows, // ✅ WASM DEX Swaps Analytics
       unknownMsgsRows, // ✅ Unknown Messages Quarantine
+      factorySupplyEventsRows,
+      wasmOracleUpdatesRows,
+      wasmTokenEventsRows,
       height
     };
   }
@@ -1374,6 +1505,9 @@ export class PostgresSink implements Sink {
     this.bufDexSwaps.push(...data.dexSwapsRows);
     this.bufDexLiquidity.push(...data.dexLiquidityRows);
     this.bufWrapperSettings.push(...data.wrapperSettingsRows);
+    this.bufWrapperEvents.push(...data.wrapperEventsRows);
+    this.bufWasmOracleUpdates.push(...data.wasmOracleUpdatesRows);
+    this.bufWasmTokenEvents.push(...data.wasmTokenEventsRows);
 
     // WASM
     this.bufWasmExec.push(...data.wasmExecRows);
@@ -1421,6 +1555,7 @@ export class PostgresSink implements Sink {
 
     // ✅ Unknown Messages Quarantine (Pushing to Buffer)
     this.bufUnknownMsgs.push(...data.unknownMsgsRows);
+    this.bufFactorySupplyEvents.push(...data.factorySupplyEventsRows);
 
     const zCount = this.bufFactoryDenoms.length + this.bufDexPools.length + this.bufDexSwaps.length + this.bufDexLiquidity.length;
     const gCount = this.bufGovVotes.length + this.bufGovDeposits.length;
@@ -1527,9 +1662,26 @@ export class PostgresSink implements Sink {
         await flushFactoryTokens(client, this.bufFactoryTokens); this.bufFactoryTokens = [];
       }
 
+      // ✅ Specialized WASM Analytics
+      if (this.bufWasmOracleUpdates.length > 0 || this.bufWasmTokenEvents.length > 0) {
+        await flushWasmAnalytics(client, {
+          oracleUpdates: this.bufWasmOracleUpdates,
+          tokenEvents: this.bufWasmTokenEvents
+        });
+        this.bufWasmOracleUpdates = [];
+        this.bufWasmTokenEvents = [];
+      }
+
       // ✅ Unknown Messages Quarantine
       if (this.bufUnknownMsgs.length > 0) {
-        await flushUnknownMessages(client, this.bufUnknownMsgs); this.bufUnknownMsgs = [];
+        await flushUnknownMessages(client, this.bufUnknownMsgs);
+        this.bufUnknownMsgs = [];
+      }
+
+      // ✅ Zigchain Factory Supply Tracking
+      if (this.bufFactorySupplyEvents.length > 0) {
+        await flushFactorySupplyEvents(client, this.bufFactorySupplyEvents);
+        this.bufFactorySupplyEvents = [];
       }
 
       // 3. Zigchain
@@ -1538,13 +1690,15 @@ export class PostgresSink implements Sink {
         dexPools: this.bufDexPools,
         dexSwaps: this.bufDexSwaps,
         dexLiquidity: this.bufDexLiquidity,
-        wrapperSettings: this.bufWrapperSettings
+        wrapperSettings: this.bufWrapperSettings,
+        wrapperEvents: this.bufWrapperEvents
       });
       this.bufFactoryDenoms = [];
       this.bufDexPools = [];
       this.bufDexSwaps = [];
       this.bufDexLiquidity = [];
       this.bufWrapperSettings = [];
+      this.bufWrapperEvents = [];
 
       await upsertProgress(client, this.cfg.pg?.progressId ?? 'default', maxH);
       await client.query('COMMIT');

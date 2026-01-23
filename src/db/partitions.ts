@@ -25,13 +25,16 @@ export async function ensureCorePartitions(client: PoolClient, minHeight: number
     ['tokens', 'cw20_transfers'],
     ['wasm', 'executions'], ['wasm', 'events'], ['wasm', 'event_attrs'], ['wasm', 'state_kv'], ['wasm', 'contract_migrations'],
     ['wasm', 'dex_swaps'], ['wasm', 'admin_changes'],
+    ['wasm', 'oracle_updates'], ['wasm', 'token_events'],
 
     // IBC - No longer partitioned (simple PK: port, channel, sequence)
     // ['ibc', 'packets'],
     // ['ibc', 'transfers'],
 
     // Zigchain
-    ['zigchain', 'dex_swaps'], ['zigchain', 'dex_liquidity']
+    ['zigchain', 'dex_swaps'], ['zigchain', 'dex_liquidity'],
+    ['zigchain', 'wrapper_events'],
+    ['tokens', 'factory_supply_events']
   ];
 
   // 🔒 Lock: Ensure only one worker checks partitions at a time
