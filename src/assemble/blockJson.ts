@@ -104,12 +104,12 @@ export async function assembleTxObjects(
 
     const msgs = Array.isArray(decodedTx?.body?.messages)
       ? decodedTx.body.messages.map((m: any) => {
-          if (!m || typeof m !== 'object') return m;
-          // Preserve Any type marker exactly, convert only the payload keys
-          const { ['@type']: atype, ...rest } = m as Record<string, any>;
-          const converted = deepConvertKeys(rest, caseMode);
-          return atype !== undefined ? { ['@type']: atype, ...converted } : converted;
-        })
+        if (!m || typeof m !== 'object') return m;
+        // Preserve Any type marker exactly, convert only the payload keys
+        const { ['@type']: atype, ...rest } = m as Record<string, any>;
+        const converted = deepConvertKeys(rest, caseMode);
+        return atype !== undefined ? { ['@type']: atype, ...converted } : converted;
+      })
       : [];
 
     const body = { ...decodedTx.body, messages: msgs };
@@ -158,6 +158,7 @@ export async function assembleBlockJsonFromParts(
   blockResultsResp: any,
   decodedTxs: any[],
   caseMode: CaseMode = 'snake',
+  validatorSet: any[] = [],
 ): Promise<BlockJson> {
   const meta = getMeta(blockResp);
   const txsB64 = getTxsBase64(blockResp);
@@ -167,5 +168,9 @@ export async function assembleBlockJsonFromParts(
     block: stripLarge(blockResp),
     block_results: stripLarge(blockResultsResp),
     txs: txObjs,
+    validator_set: {
+      proposer_address: blockResp?.block?.header?.proposer_address,
+      validators: validatorSet
+    }
   };
 }

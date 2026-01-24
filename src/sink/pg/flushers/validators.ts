@@ -19,7 +19,7 @@ export async function upsertValidators(client: PoolClient, rows: any[]) {
     const finalRows = Array.from(mergedMap.values());
 
     const cols = [
-        'operator_address', 'moniker', 'website', 'details',
+        'operator_address', 'consensus_address', 'consensus_pubkey', 'moniker', 'website', 'details',
         'commission_rate', 'max_commission_rate', 'max_change_rate',
         'min_self_delegation', 'status', 'updated_at_height', 'updated_at_time'
     ];
@@ -30,10 +30,14 @@ export async function upsertValidators(client: PoolClient, rows: any[]) {
         cols,
         finalRows,
         `ON CONFLICT (operator_address) DO UPDATE SET
+      consensus_address = COALESCE(EXCLUDED.consensus_address, core.validators.consensus_address),
+      consensus_pubkey = COALESCE(EXCLUDED.consensus_pubkey, core.validators.consensus_pubkey),
       moniker = COALESCE(EXCLUDED.moniker, core.validators.moniker),
       website = COALESCE(EXCLUDED.website, core.validators.website),
       details = COALESCE(EXCLUDED.details, core.validators.details),
       commission_rate = COALESCE(EXCLUDED.commission_rate, core.validators.commission_rate),
+      max_commission_rate = COALESCE(EXCLUDED.max_commission_rate, core.validators.max_commission_rate),
+      max_change_rate = COALESCE(EXCLUDED.max_change_rate, core.validators.max_change_rate),
       status = COALESCE(EXCLUDED.status, core.validators.status),
       updated_at_height = EXCLUDED.updated_at_height,
       updated_at_time = EXCLUDED.updated_at_time`

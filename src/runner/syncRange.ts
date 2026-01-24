@@ -182,16 +182,17 @@ export async function syncRange(
    */
   async function processHeight(h: number) {
     try {
-      const [b, br] = await Promise.all([
+      const [b, br, vs] = await Promise.all([
         withTimeout(rpc.fetchBlock(h), blockTimeoutMs, `fetchBlock@${h}`),
         withTimeout(rpc.fetchBlockResults(h), blockTimeoutMs, `fetchBlockResults@${h}`),
+        withTimeout(rpc.getJson('/validators', { height: h }), blockTimeoutMs, `fetchValidators@${h}`),
       ]);
       const txsB64: string[] = b?.block?.data?.txs ?? [];
       const decoded = await Promise.all(
         txsB64.map((x, i) => withTimeout(pool.submit(x), blockTimeoutMs, `decode#${i}@${h}`)),
       );
       const assembled = await withTimeout(
-        assembleBlockJsonFromParts(rpc, b, br, decoded, caseMode),
+        assembleBlockJsonFromParts(rpc, b, br, decoded, caseMode, vs?.result?.validators || vs?.validators),
         blockTimeoutMs,
         `assemble@${h}`,
       );

@@ -7,6 +7,7 @@ import { Sink, SinkConfig } from './types.js';
 import { createPgPool, getPgPool, closePgPool } from '../db/pg.js';
 import { ensureCorePartitions, ensureIbcPartitions } from '../db/partitions.js';
 import { upsertProgress } from '../db/progress.js';
+import { execBatchedInsert } from './pg/batch.js';
 import { recordMissingBlock, resolveMissingBlock } from '../db/missing_blocks.js';
 import { getLogger } from '../utils/logger.js';
 import {
@@ -134,6 +135,8 @@ export class PostgresSink implements Sink {
 
   // ✅ Validator Buffer
   private bufValidators: any[] = [];
+  private bufValidatorSet: any[] = [];
+  private bufMissedBlocks: any[] = [];
 
   // ✅ IBC Buffer
   private bufIbcPackets: any[] = [];
@@ -279,6 +282,38 @@ export class PostgresSink implements Sink {
       evidence_count: Array.isArray(b?.block?.evidence?.evidence) ? b.block.evidence.evidence.length : 0,
       app_hash: b?.block?.header?.app_hash ?? null,
     };
+
+    // ✅ Validator Set & Missed Blocks Extraction
+    const validatorSetRows: any[] = [];
+    const missedBlocksRows: any[] = [];
+
+    const vSet = blockLine.validator_set;
+    if (vSet?.validators) {
+      for (const v of vSet.validators as any[]) {
+        validatorSetRows.push({
+          height,
+          operator_address: v.address,
+          voting_power: v.voting_power,
+          proposer_priority: v.proposer_priority
+        });
+      }
+    }
+
+    // Missed blocks: look at current block signatures for height-1
+    const signatures = b?.block?.last_commit?.signatures;
+    if (Array.isArray(signatures)) {
+      for (const sig of signatures) {
+        // block_id_flag: 1 = BLOCK_ID_FLAG_ABSENT, 2 = COMMIT, 3 = NIL
+        const isAbsent = sig.block_id_flag === 1 || sig.block_id_flag === 'BLOCK_ID_FLAG_ABSENT';
+        if (isAbsent && sig.validator_address) {
+          missedBlocksRows.push({
+            operator_address: sig.validator_address,
+            height: height - 1
+          });
+          log.debug(`[uptime] missed block: ${sig.validator_address} at height ${height - 1}`);
+        }
+      }
+    }
 
     const txRows: any[] = [];
     const msgRows: any[] = [];
@@ -1486,7 +1521,7 @@ export class PostgresSink implements Sink {
       transfersRows, wasmExecRows, wasmEventsRows,
       govVotesRows, govDepositsRows, govProposalsRows, // 👈 Returning Gov Data
       stakeDelegRows, stakeDistrRows, // 👈 Returning Staking Data
-      validatorsRows, // 👈 Returning Validator Data
+      validatorsRows, validatorSetRows, missedBlocksRows, // 👈 Returning Validator Data
       ibcPacketsRows, // 👈 Returning IBC Data
       ibcChannelsRows,
       ibcTransfersRows,
@@ -1552,6 +1587,8 @@ export class PostgresSink implements Sink {
 
     // ✅ Validator (Pushing to Buffer)
     this.bufValidators.push(...data.validatorsRows);
+    this.bufValidatorSet.push(...data.validatorSetRows);
+    this.bufMissedBlocks.push(...data.missedBlocksRows);
 
     // ✅ IBC (Pushing to Buffer)
     this.bufIbcPackets.push(...data.ibcPacketsRows);
@@ -1635,6 +1672,10 @@ export class PostgresSink implements Sink {
 
       // ✅ Flushing Validator Data
       await upsertValidators(client, this.bufValidators); this.bufValidators = [];
+      await execBatchedInsert(client, 'core.validator_set', ['height', 'operator_address', 'voting_power', 'proposer_priority'], this.bufValidatorSet, 'ON CONFLICT (height, operator_address) DO NOTHING');
+      this.bufValidatorSet = [];
+      await execBatchedInsert(client, 'core.validator_missed_blocks', ['operator_address', 'height'], this.bufMissedBlocks, 'ON CONFLICT (operator_address, height) DO NOTHING');
+      this.bufMissedBlocks = [];
 
       // ✅ Flushing IBC Data
       if (this.bufIbcPackets.length > 0) {

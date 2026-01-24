@@ -1,8 +1,5 @@
 /**
  * Entry point for the Cosmos indexer application.
- * Initializes configuration, RPC client, decoding pool, and sink.
- * Handles backfilling blockchain data and optionally follows new blocks in real-time.
- * Responds to SIGINT and SIGTERM signals to gracefully shut down.
  */
 // src/index.ts
 import { EventEmitter } from 'node:events';
@@ -10,9 +7,13 @@ import { getConfig, printConfig } from './config.ts';
 import { createRpcClientFromConfig } from './rpc/client.ts';
 import { createTxDecodePool } from './decode/txPool.ts';
 import { createSink } from './sink/index.ts';
-import { closePgPool, createPgPool } from './db/pg.ts';
+import { closePgPool, createPgPool, getPgPool } from './db/pg.ts';
 import { getProgress } from './db/progress.ts';
 import { upsertValidators } from './sink/pg/flushers/validators.ts';
+import { deriveConsensusAddress } from './utils/crypto.ts';
+import { loadProtoRoot, decodeAnyWithRoot } from './decode/dynamicProto.ts';
+import { base64ToBytes } from './utils/bytes.ts';
+import path from 'node:path';
 import { getLogger } from './utils/logger.ts';
 import { syncRange } from './runner/syncRange.ts';
 import { retryMissingBlocks } from './runner/retryMissing.ts';
@@ -21,14 +22,6 @@ import { followLoop } from './runner/follow.ts';
 EventEmitter.defaultMaxListeners = 0;
 const log = getLogger('index');
 
-/**
- * Main function that runs the indexing process.
- * It resolves configuration, determines starting and ending block heights,
- * sets up RPC client, decode pool, and sink, performs range backfill,
- * and if enabled, follows new blocks in real-time.
- *
- * @returns {Promise<void>} Resolves when the indexing process completes or exits.
- */
 async function main() {
   const cfg = getConfig();
   printConfig(cfg);
@@ -65,8 +58,7 @@ async function main() {
   if (startFrom == null || endHeight == null) throw new Error('Both startFrom and endHeight must be resolved.');
   log.info(`[start] from ${startFrom} to ${endHeight} (incl.)`);
 
-  const defaultProtoDir = new URL('../protos', import.meta.url).pathname;
-  const protoDir = process.env.PROTO_DIR || defaultProtoDir;
+  const protoDir = process.env.PROTO_DIR || path.join(process.cwd(), 'protos');
   log.info(`[proto] dir = ${protoDir}`);
 
   const poolSize = Math.max(1, Math.min(cfg.concurrency ?? 8, 8));
@@ -90,88 +82,175 @@ async function main() {
   // 🛡️ INITIAL SYNC: Fetch validators on startup
   if (cfg.sinkKind === 'postgres') {
     try {
-      log.info('[start] syncing active validators from RPC…');
-      const startPool = createPgPool(cfg.pg!);
-      const client = await startPool.connect();
+      log.info('[start] syncing staking validators…');
+      const protoRoot = await loadProtoRoot(protoDir);
+      const pool = getPgPool();
+      const client = await pool.connect();
       try {
-        const valSet = await rpc.getJson('/validators');
-        const vals = valSet?.result?.validators || valSet?.validators || [];
-        if (vals.length > 0) {
-          const rows = vals.map((v: any) => ({
-            operator_address: v.address, // Consensus address as fallback
-            moniker: v.moniker || `Validator ${v.address.slice(0, 8)}`,
-            status: 'BOND_STATUS_BONDED',
-            updated_at_height: startFrom,
-            updated_at_time: new Date()
-          }));
-          // ✅ FIX: Explicit transaction for validator sync
-          await client.query('BEGIN');
-          await upsertValidators(client, rows);
-          await client.query('COMMIT');
-          log.info(`[start] synced ${vals.length} validators (Consensus ADDRs)`);
-        }
-      } finally {
-        client.release();
-        // ❌ DO NOT call startPool.end() here as it is a singleton shared by the sink!
-      }
-    } catch (err) {
-      log.warn('[start] validator sync failed (non-critical):', err instanceof Error ? err.message : String(err));
-    }
+        const stakingRes = await rpc.queryAbci('/cosmos.staking.v1beta1.Query/Validators');
+        if (stakingRes?.value) {
+          const decoded = decodeAnyWithRoot('cosmos.staking.v1beta1.QueryValidatorsResponse', base64ToBytes(stakingRes.value), protoRoot);
+          const stakingVals = Array.isArray(decoded.validators) ? decoded.validators : [];
 
-    // 🛡️ INITIAL SYNC: Fetch network parameters on startup via RPC
-    try {
-      log.info('[start] syncing network parameters from RPC (Port 26657)…');
-      const startPool = createPgPool(cfg.pg!);
-      const client = await startPool.connect();
-      try {
-        const modules = [
-          { name: 'auth', path: '/cosmos.auth.v1beta1.Query/Params', resp: 'cosmos.auth.v1beta1.QueryParamsResponse' },
-          { name: 'bank', path: '/cosmos.bank.v1beta1.Query/Params', resp: 'cosmos.bank.v1beta1.QueryParamsResponse' },
-          { name: 'staking', path: '/cosmos.staking.v1beta1.Query/Params', resp: 'cosmos.staking.v1beta1.QueryParamsResponse' },
-          { name: 'distribution', path: '/cosmos.distribution.v1beta1.Query/Params', resp: 'cosmos.distribution.v1beta1.QueryParamsResponse' },
-          { name: 'mint', path: '/cosmos.mint.v1beta1.Query/Params', resp: 'cosmos.mint.v1beta1.QueryParamsResponse' },
-          { name: 'slashing', path: '/cosmos.slashing.v1beta1.Query/Params', resp: 'cosmos.slashing.v1beta1.QueryParamsResponse' },
-          { name: 'factory', path: '/zigchain.factory.Query/Params', resp: 'zigchain.factory.QueryParamsResponse' },
-          // Gov v1 (Newer SDKs)
-          { name: 'gov', path: '/cosmos.gov.v1.Query/Params', resp: 'cosmos.gov.v1.QueryParamsResponse' },
-        ];
+          if (stakingVals.length > 0) {
+            log.info(`[start] found ${stakingVals.length} staking validators`);
+            log.info('[start] sample validator keys: ' + Object.keys(stakingVals[0]).join(', '));
+            log.info('[start] sample validator JSON: ' + JSON.stringify(stakingVals[0]));
+          }
 
-        const rows = [];
-        for (const mod of modules) {
-          try {
-            const abci = await rpc.queryAbci(mod.path);
-            if (abci?.value) {
-              const decoded = await decodePool.decodeGeneric(mod.resp, abci.value);
-              const params = decoded.params || decoded.voting_params || decoded.tally_params || decoded.deposit_params || decoded;
-              if (params) {
-                rows.push({
-                  height: startFrom,
-                  time: new Date(),
-                  module: mod.name,
-                  param_key: '_all',
-                  old_value: null,
-                  new_value: params
-                });
+          const rows = [];
+          for (const v of (stakingVals as any[])) {
+            const opAddr = v.operator_address || v.operatorAddress || v.address || v.operator_addr;
+            if (!opAddr) continue;
+
+            let consAddr: string | null = null;
+            const pubAny = v.consensus_pubkey || v.consensusPubkey || v.consensusPubKey || v.consensus_pub_key;
+            if (pubAny?.value) {
+              try {
+                let rawVal: Uint8Array;
+                if (typeof pubAny.value === 'string') {
+                  rawVal = base64ToBytes(pubAny.value);
+                } else if (typeof pubAny.value === 'object' && pubAny.value !== null) {
+                  rawVal = new Uint8Array(Object.values(pubAny.value));
+                } else {
+                  throw new Error('Unsupported pubAny.value type: ' + typeof pubAny.value);
+                }
+
+                const decodedPub = decodeAnyWithRoot(pubAny['@type'] || pubAny.type_url || pubAny.typeUrl, rawVal, protoRoot);
+                const rawKey = decodedPub.key || decodedPub.value;
+
+                if (rawKey) {
+                  // If rawKey is a byte object, convert back to b64 for deriveConsensusAddress
+                  const rawKeyB64 = (typeof rawKey === 'string')
+                    ? rawKey
+                    : Buffer.from(Object.values(rawKey) as any).toString('base64');
+
+                  consAddr = deriveConsensusAddress(rawKeyB64);
+                  log.info(`[start] derived consAddr ${consAddr} for ${opAddr}`);
+                }
+              } catch (e) {
+                log.warn(`Failed to derive consAddr for ${opAddr}: ${e}`);
               }
+            } else {
+              log.info(`[start] no consensus pubkey for ${opAddr}`);
             }
-          } catch (e) {
-            log.debug(`[start] skip module ${mod.name}: ${e instanceof Error ? e.message : String(e)}`);
+
+            // Extract commission rates (handle both camelCase and snake_case)
+            const commRates = v.commission?.commissionRates || v.commission?.commission_rates;
+
+            // Helper to convert 18-decimal integer to decimal (e.g., "50000000000000000" -> "0.05")
+            const toDecimal = (val: string | number | null | undefined): string | null => {
+              if (val == null) return null;
+              try {
+                const str = String(val);
+                // If already looks like a decimal, return as-is
+                if (str.includes('.') && parseFloat(str) < 100) return str;
+                // Otherwise divide by 10^18
+                const num = BigInt(str);
+                const divisor = BigInt('1000000000000000000');
+                const intPart = num / divisor;
+                const fracPart = num % divisor;
+                const fracStr = fracPart.toString().padStart(18, '0');
+                return `${intPart}.${fracStr}`;
+              } catch { return null; }
+            };
+
+            // Store raw pubkey for reference
+            let rawPubkeyB64: string | null = null;
+            if (pubAny?.value) {
+              try {
+                if (typeof pubAny.value === 'string') {
+                  rawPubkeyB64 = pubAny.value;
+                } else if (typeof pubAny.value === 'object' && pubAny.value !== null) {
+                  rawPubkeyB64 = Buffer.from(Object.values(pubAny.value) as any).toString('base64');
+                }
+              } catch (e) { /* ignore */ }
+            }
+
+            rows.push({
+              operator_address: opAddr,
+              consensus_address: consAddr,
+              consensus_pubkey: rawPubkeyB64,
+              moniker: v.description?.moniker || `Validator ${String(opAddr).slice(-8)}`,
+              website: v.description?.website,
+              details: v.description?.details,
+              commission_rate: toDecimal(commRates?.rate || commRates?.Rate),
+              max_commission_rate: toDecimal(commRates?.maxRate || commRates?.max_rate || commRates?.MaxRate),
+              max_change_rate: toDecimal(commRates?.maxChangeRate || commRates?.max_change_rate || commRates?.MaxChangeRate),
+              min_self_delegation: v.min_self_delegation || v.minSelfDelegation,
+              status: v.status,
+              updated_at_height: startFrom,
+              updated_at_time: new Date()
+            });
+          }
+
+          if (rows.length > 0) {
+            await client.query('BEGIN');
+            await client.query('DELETE FROM core.validators');
+            await upsertValidators(client, rows);
+            await client.query('COMMIT');
+            log.info(`[start] synced ${rows.length} validators`);
           }
         }
-
-        if (rows.length > 0) {
-          const { flushNetworkParams } = await import('./sink/pg/flushers/params.js');
-          await client.query('BEGIN');
-          await flushNetworkParams(client, rows);
-          await client.query('COMMIT');
-          log.info(`[start] synced parameters for ${rows.length} modules using RPC`);
-        }
       } finally {
         client.release();
       }
     } catch (err) {
-      log.warn('[start] network params sync failed (non-critical):', err instanceof Error ? err.message : String(err));
+      log.warn('[start] validator sync failed:', err instanceof Error ? err.message : String(err));
     }
+  }
+
+  // 🛡️ INITIAL SYNC: Fetch network parameters
+  try {
+    const pool = getPgPool();
+    const client = await pool.connect();
+    try {
+      const modules = [
+        { name: 'auth', path: '/cosmos.auth.v1beta1.Query/Params', resp: 'cosmos.auth.v1beta1.QueryParamsResponse' },
+        { name: 'bank', path: '/cosmos.bank.v1beta1.Query/Params', resp: 'cosmos.bank.v1beta1.QueryParamsResponse' },
+        { name: 'staking', path: '/cosmos.staking.v1beta1.Query/Params', resp: 'cosmos.staking.v1beta1.QueryParamsResponse' },
+        { name: 'distribution', path: '/cosmos.distribution.v1beta1.Query/Params', resp: 'cosmos.distribution.v1beta1.QueryParamsResponse' },
+        { name: 'mint', path: '/cosmos.mint.v1beta1.Query/Params', resp: 'cosmos.mint.v1beta1.QueryParamsResponse' },
+        { name: 'slashing', path: '/cosmos.slashing.v1beta1.Query/Params', resp: 'cosmos.slashing.v1beta1.QueryParamsResponse' },
+        { name: 'factory', path: '/zigchain.factory.Query/Params', resp: 'zigchain.factory.QueryParamsResponse' },
+        { name: 'gov', path: '/cosmos.gov.v1.Query/Params', resp: 'cosmos.gov.v1.QueryParamsResponse' },
+      ];
+
+      const rows = [];
+      for (const mod of modules) {
+        try {
+          const abci = await rpc.queryAbci(mod.path);
+          if (abci?.value) {
+            const decoded = await decodePool.decodeGeneric(mod.resp, abci.value);
+            const params = decoded.params || decoded.voting_params || decoded.tally_params || decoded.deposit_params || decoded;
+            if (params) {
+              rows.push({
+                height: startFrom,
+                time: new Date(),
+                module: mod.name,
+                param_key: '_all',
+                old_value: null,
+                new_value: params
+              });
+            }
+          }
+        } catch (e) {
+          log.debug(`[start] skip module ${mod.name}`);
+        }
+      }
+
+      if (rows.length > 0) {
+        const { flushNetworkParams } = await import('./sink/pg/flushers/params.js');
+        await client.query('BEGIN');
+        await flushNetworkParams(client, rows);
+        await client.query('COMMIT');
+        log.info(`[start] synced parameters for ${rows.length} modules`);
+      }
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    log.warn('[start] params sync failed');
   }
 
   const backfill = await syncRange(rpc, decodePool, sink, {
@@ -183,10 +262,7 @@ async function main() {
     caseMode: cfg.caseMode,
   });
 
-  log.info(
-    `[done-range] processed ${backfill.processed} blocks in [${startFrom}, ${endHeight}] — switching mode: ${cfg.follow === false ? 'exit' : 'follow'
-    }`,
-  );
+  log.info(`[done-range] processed ${backfill.processed} blocks`);
 
   if (cfg.sinkKind === 'postgres') {
     await retryMissingBlocks(rpc, decodePool, sink, {
@@ -204,18 +280,13 @@ async function main() {
       caseMode: cfg.caseMode,
       missingRetryIntervalMs: cfg.missingRetryIntervalMs,
     });
-
-    await shutdown(decodePool, sink);
-  } else {
-    await shutdown(decodePool, sink);
   }
+
+  await cleanup(decodePool, sink);
 }
 
-/**
- * Cleanup function to flush and close all connections.
- */
-async function shutdown(decodePool: any, sink: any) {
-  log.info('Graceful shutdown initiated…');
+async function cleanup(decodePool: any, sink: any) {
+  log.info('Shutdown initiated…');
   try {
     if (decodePool) await decodePool.close();
     if (sink) {
@@ -224,28 +295,12 @@ async function shutdown(decodePool: any, sink: any) {
     }
     log.info('Shutdown complete.');
   } catch (err) {
-    log.error('Error during shutdown:', err);
+    log.error('Shutdown error:', err);
   }
 }
 
-/**
- * Handle SIGINT signal to gracefully shut down the indexer.
- */
-process.on('SIGINT', async () => {
-  log.warn('SIGINT received');
-  // We cannot easily pass decodePool/sink here without globalizing them, 
-  // but the followLoop/syncRange usually throw on termination or can be awaited.
-  // For now, we allow the main catch block or natural exit to handle it if possible.
-  // Alternatively, we use process.exit(0) but ideally we'd want a global state.
-  process.exit(0);
-});
-/**
- * Handle SIGTERM signal to gracefully shut down the indexer.
- */
-process.on('SIGTERM', async () => {
-  log.warn('SIGTERM received');
-  process.exit(0);
-});
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
 
 main().catch((e) => {
   const msg = e instanceof Error ? e.stack || e.message : String(e);
