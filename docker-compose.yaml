@@ -19,8 +19,11 @@ services:
     ports:
       - "127.0.0.1:${PG_PORT:-5432}:5432"
     volumes:
-      - pgdata_cosmosindexer:/var/lib/postgresql/data
-    shm_size: 4gb  # ✅ Increased from 1gb for 5.4M+ scale
+      # ✅ STORAGE CONFIG: Changed to "../indexer-data" to keep data OUTSIDE the project folder.
+      # This fixes the Docker build error by preventing Docker from scanning the locked database files.
+      - ../indexer-data:/var/lib/postgresql/data
+      
+    shm_size: 8gb  # ✅ Increased from 1gb for 5.4M+ scale
     command: 
       - "postgres"
       - "-c"
@@ -38,7 +41,21 @@ services:
       - "-c"
       - "effective_cache_size=8GB"  # ✅ Added for query planning
       - "-c"
-      - "archive_mode=off"          # ✅ STOPS THE LOG WARNINGS/spamming
+      - "archive_mode=off"  # ✅ STOPS THE LOG WARNINGS/spamming
+      # ✅ Autovacuum throttling (prevents crash during high ingestion)
+      - "-c"
+      - "autovacuum_vacuum_cost_limit=500"  # ✅ Slow down autovacuum
+      - "-c"
+      - "autovacuum_vacuum_cost_delay=50ms"  # ✅ Add delays between vacuum I/O
+      - "-c"
+      - "autovacuum_naptime=60s"  # ✅ Less frequent autovacuum runs
+      - "-c"
+      - "autovacuum_analyze_threshold=10000"  # ✅ Higher threshold before ANALYZE
+      # ✅ WAL write optimization (prevents xlog flush errors)
+      - "-c"
+      - "wal_buffers=64MB"  # ✅ Bigger WAL buffer for write bursts
+      - "-c"
+      - "synchronous_commit=off"  # ✅ Faster writes (safe for indexer)
 
   indexer:
     build:
@@ -73,5 +90,5 @@ services:
     working_dir: /usr/src/app
 
 
-volumes:
-  pgdata_cosmosindexer:
+# volumes:
+#   pg-data_cosmosindexer:

@@ -1,10 +1,11 @@
 import type { PoolClient } from 'pg';
-import { 
-  insertFactoryDenoms, 
-  insertDexPools, 
-  insertDexSwaps, 
+import {
+  insertFactoryDenoms,
+  insertDexPools,
+  insertDexSwaps,
   insertDexLiquidity, // 👈 New Liquidity Import
-  insertWrapperSettings 
+  insertWrapperSettings,
+  insertWrapperEvents
 } from '../inserters/zigchain.js';
 
 /**
@@ -12,13 +13,14 @@ import {
  * Delegates the actual SQL construction to the Inserters.
  */
 export async function flushZigchainData(
-  client: PoolClient, 
+  client: PoolClient,
   data: {
     factoryDenoms?: any[],
     dexPools?: any[],
     dexSwaps?: any[],
     dexLiquidity?: any[], // 👈 Added New Table Support
-    wrapperSettings?: any[]
+    wrapperSettings?: any[],
+    wrapperEvents?: any[]
   }
 ): Promise<void> {
   // Safety Timeouts
