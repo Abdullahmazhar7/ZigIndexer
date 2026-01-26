@@ -1,28 +1,26 @@
 import type { PoolClient } from 'pg';
-import { makeMultiInsert } from '../batch.js';
+import { execBatchedInsert } from '../batch.js';
+import { safeSerializeAttributes } from './events.js';
 
 export async function insertWasmEvents(client: PoolClient, rows: any[]): Promise<void> {
   if (!rows?.length) return;
-  
+
   const cols = ['contract', 'height', 'tx_hash', 'msg_index', 'event_index', 'event_type', 'attributes'];
 
+  // ✅ Apply safe serialization and truncation
   const safeRows = rows.map(r => ({
     ...r,
-    attributes: toJsonSafe(r.attributes)
+    attributes: safeSerializeAttributes(r.attributes)
   }));
 
-  const { text, values } = makeMultiInsert(
+  // ✅ Use batched insert with strict limits
+  await execBatchedInsert(
+    client,
     'wasm.events',
     cols,
     safeRows,
     'ON CONFLICT (height, tx_hash, msg_index, event_index) DO NOTHING',
-    { attributes: 'jsonb' }
+    { attributes: 'jsonb' },
+    { maxRows: 100, maxParams: 700 }
   );
-  await client.query(text, values);
-}
-
-function toJsonSafe(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'string') return value;
-  return JSON.stringify(value);
 }

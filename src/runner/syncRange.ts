@@ -216,8 +216,18 @@ export async function syncRange(
   let inFlight = 0;
 
   await new Promise<void>((resolve) => {
-    const maybeSpawn = () => {
+    const maybeSpawn = async () => {
       while (inFlight < concurrency && (nextHeight <= to || retryQueue.length > 0)) {
+        // 🛡️ MEMORY BACKPRESSURE: 
+        // If the 'ready' buffer is too large (twice the concurrency), 
+        // it means we are waiting for a slow block at the head of the line.
+        // We pause fetching to prevent JS memory overflow.
+        if (ready.size > concurrency * 2) {
+          log.debug(`[backpressure] ready buffer is full (${ready.size}), waiting…`);
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+
         const h = retryQueue.length > 0 ? (retryQueue.shift() as number) : nextHeight++;
         inFlight++;
         processHeight(h).finally(() => {

@@ -90,6 +90,11 @@ export async function upsertGovProposals(
     proposal_type: string | null;
     status: string | null;
     submit_time: Date | null;
+    deposit_end?: Date | null;
+    voting_start?: Date | null;
+    voting_end?: Date | null;
+    total_deposit?: any | null;
+    changes?: any | null;
   }>,
 ) {
   if (!rows.length) return;
@@ -101,7 +106,11 @@ export async function upsertGovProposals(
   }
   const finalRows = Array.from(mergedMap.values());
 
-  const columns = ['proposal_id', 'submitter', 'title', 'summary', 'proposal_type', 'status', 'submit_time'] as const;
+  const columns = [
+    'proposal_id', 'submitter', 'title', 'summary', 'proposal_type',
+    'status', 'submit_time', 'deposit_end', 'voting_start', 'voting_end',
+    'total_deposit', 'changes'
+  ] as const;
 
   const shaped = finalRows.map((r) => ({
     proposal_id: r.proposal_id.toString(),
@@ -111,6 +120,11 @@ export async function upsertGovProposals(
     proposal_type: r.proposal_type,
     status: r.status ?? 'deposit_period',
     submit_time: r.submit_time ? r.submit_time.toISOString() : null,
+    deposit_end: r.deposit_end ? r.deposit_end.toISOString() : null,
+    voting_start: r.voting_start ? r.voting_start.toISOString() : null,
+    voting_end: r.voting_end ? r.voting_end.toISOString() : null,
+    total_deposit: r.total_deposit ? JSON.stringify(r.total_deposit) : null,
+    changes: r.changes ? JSON.stringify(r.changes) : null,
   }));
 
   await execBatchedInsert(
@@ -123,6 +137,12 @@ export async function upsertGovProposals(
       title         = COALESCE(EXCLUDED.title, gov.proposals.title),
       summary       = COALESCE(EXCLUDED.summary, gov.proposals.summary),
       proposal_type = COALESCE(EXCLUDED.proposal_type, gov.proposals.proposal_type),
-      submit_time   = COALESCE(EXCLUDED.submit_time, gov.proposals.submit_time)`,
+      status        = EXCLUDED.status,
+      submit_time   = COALESCE(EXCLUDED.submit_time, gov.proposals.submit_time),
+      deposit_end   = COALESCE(EXCLUDED.deposit_end, gov.proposals.deposit_end),
+      voting_start  = COALESCE(EXCLUDED.voting_start, gov.proposals.voting_start),
+      voting_end    = COALESCE(EXCLUDED.voting_end, gov.proposals.voting_end),
+      total_deposit = COALESCE(EXCLUDED.total_deposit, gov.proposals.total_deposit),
+      changes       = COALESCE(EXCLUDED.changes, gov.proposals.changes)`,
   );
 }

@@ -123,30 +123,83 @@ export function buildFeeFromDecodedFee(fee: any): any | null {
 
 /**
  * Collects potential signer addresses from a list of decoded messages.
- * Scans common fields like `signer`, `from_address`, `delegator_address`, `validator_address`, etc.
+ * Scans common fields and then falls back to a deep scan for Bech32 strings.
  * @param {any[]} msgs - Array of decoded messages.
  * @returns {(string[]|null)} Unique list of candidate addresses or `null` if none found.
  */
 export function collectSignersFromMessages(msgs: any[]): string[] | null {
   const s = new Set<string>();
   for (const m of msgs) {
+    if (!m) continue;
+
+    // 1. High-priority candidates
     const candidates = [
-      m?.signer,
-      m?.from_address,
-      m?.delegator_address,
-      m?.validator_address,
-      m?.authority,
-      m?.admin,
-      m?.granter,
-      m?.grantee,
-      m?.sender,
-      m?.creator,
+      m.signer, m.from_address, m.delegator_address, m.voter, m.sender,
+      m.admin, m.proposer, m.creator, m.granter, m.depositor,
+      m.proposer_address, m.proposerAddress, m.sender_address, m.authority
     ];
     for (const c of candidates) {
-      if (typeof c === 'string' && c.length >= 10) s.add(c);
+      if (typeof c === 'string' && isLikelyAddress(c)) s.add(c);
     }
+
+    // 2. Recursive fallback scanner (finds ANY address in the message)
+    const deep = scanForAddresses(m);
+    for (const d of deep) s.add(d);
   }
   return s.size ? Array.from(s) : null;
+}
+
+/**
+ * Picks a single best candidate for 'signer' from a decoded message.
+ * @param {any} m - Decoded message.
+ * @returns {string|null} The best signer candidate.
+ */
+export function pickSigner(m: any): string | null {
+  if (!m || typeof m !== 'object') return null;
+
+  // 1. Try common fields first
+  const candidates = [
+    m.signer, m.from_address, m.delegator_address, m.voter, m.sender,
+    m.admin, m.proposer, m.creator, m.granter, m.depositor,
+    m.proposer_address, m.sender_address, m.validator_address, m.authority
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && isLikelyAddress(c)) return c;
+  }
+
+  // 2. Fallback to first address-like string found in the object
+  const deep = scanForAddresses(m);
+  return deep.length > 0 ? deep[0]! : null;
+}
+
+/**
+ * Helper to check if a string looks like a Bech32 address (e.g. zig1..., cosmos1...).
+ */
+function isLikelyAddress(s: string): boolean {
+  if (!s || typeof s !== 'string') return false;
+  // Standard Bech32 format: prefix + '1' + 38-58 chars
+  return /^[a-z]+1[a-z0-9]{38,58}$/.test(s);
+}
+
+/**
+ * Recursively scans an object for any string that looks like an address.
+ */
+function scanForAddresses(obj: any, depth = 0): string[] {
+  const found: string[] = [];
+  if (!obj || depth > 5) return found;
+
+  if (typeof obj === 'string') {
+    if (isLikelyAddress(obj)) found.push(obj);
+  } else if (Array.isArray(obj)) {
+    for (const item of obj) {
+      found.push(...scanForAddresses(item, depth + 1));
+    }
+  } else if (typeof obj === 'object') {
+    for (const val of Object.values(obj)) {
+      found.push(...scanForAddresses(val, depth + 1));
+    }
+  }
+  return found;
 }
 
 /**

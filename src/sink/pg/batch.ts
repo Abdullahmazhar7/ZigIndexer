@@ -66,37 +66,37 @@ export async function execBatchedInsert(
   types?: Record<string, string>,
   opts?: { maxRows?: number; maxParams?: number },
 ) {
-  const maxRows = opts?.maxRows ?? 5_000;
-  const maxParams = opts?.maxParams ?? 30_000;
+  const maxRows = opts?.maxRows ?? 500;
+  const maxParams = opts?.maxParams ?? 3_000;
 
   if (!rows.length) return;
 
   const prepped = !types
     ? rows
     : rows.map((r) => {
-        const x: any = { ...r };
-        for (const [col, t] of Object.entries(types)) {
-          if (t === 'jsonb') {
-            const v = x[col];
-            if (v === null || v === undefined) {
-              x[col] = null;
-            } else if (typeof v === 'string') {
-              x[col] = v; // предполагаем валидный JSON
-            } else {
-              x[col] = JSON.stringify(v, (_k, val) => {
-                if (typeof val === 'bigint') return Number(val);
-                if (val instanceof Uint8Array) return Buffer.from(val).toString('base64');
-                if (Buffer.isBuffer(val)) return val.toString('base64');
-                if (val instanceof Date) return val.toISOString();
-                return val;
-              });
-            }
+      const x: any = { ...r };
+      for (const [col, t] of Object.entries(types)) {
+        if (t === 'jsonb') {
+          const v = x[col];
+          if (v === null || v === undefined) {
+            x[col] = null;
+          } else if (typeof v === 'string') {
+            x[col] = v; // предполагаем валидный JSON
+          } else {
+            x[col] = JSON.stringify(v, (_k, val) => {
+              if (typeof val === 'bigint') return Number(val);
+              if (val instanceof Uint8Array) return Buffer.from(val).toString('base64');
+              if (Buffer.isBuffer(val)) return val.toString('base64');
+              if (val instanceof Date) return val.toISOString();
+              return val;
+            });
           }
         }
-        return x;
-      });
+      }
+      return x;
+    });
 
-  for (let i = 0; i < prepped.length; ) {
+  for (let i = 0; i < prepped.length;) {
     let count = 0;
     let params = 0;
     while (i + count < prepped.length) {

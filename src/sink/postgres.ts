@@ -17,6 +17,7 @@ import {
   toNum,
   buildFeeFromDecodedFee,
   collectSignersFromMessages,
+  pickSigner,
   parseCoin,
   parseCoins, // ✅ ADDED
   findAttr,
@@ -434,7 +435,7 @@ export class PostgresSink implements Sink {
 
         msgRows.push({
           tx_hash, msg_index: i, height, type_url: type, value: m,
-          signer: m?.signer ?? m?.from_address ?? m?.delegator_address ?? null,
+          signer: pickSigner(m),
         });
 
         const msgLog = logMap.get(i) || logMap.get(-1); // Fallback to flat log if per-msg missing
@@ -1631,10 +1632,77 @@ export class PostgresSink implements Sink {
   private async flushAll(): Promise<void> {
     if (this.bufBlocks.length === 0 && this.bufTxs.length === 0) return;
 
+    // ✅ SNAPSHOT & SWAP BUFFERS
+    // We move all current data to a local "snapshot" and clear the main buffers.
+    // This allows incoming writes to continue safely while we are awaiting the DB.
+    const snapshot = {
+      blocks: this.bufBlocks,
+      txs: this.bufTxs,
+      msgs: this.bufMsgs,
+      events: this.bufEvents,
+      attrs: this.bufAttrs,
+      transfers: this.bufTransfers,
+      factoryDenoms: this.bufFactoryDenoms,
+      dexPools: this.bufDexPools,
+      dexSwaps: this.bufDexSwaps,
+      dexLiquidity: this.bufDexLiquidity,
+      wrapperSettings: this.bufWrapperSettings,
+      wrapperEvents: this.bufWrapperEvents,
+      wasmOracleUpdates: this.bufWasmOracleUpdates,
+      wasmTokenEvents: this.bufWasmTokenEvents,
+      wasmExec: this.bufWasmExec,
+      wasmEvents: this.bufWasmEvents,
+      wasmEventAttrs: this.bufWasmEventAttrs,
+      govVotes: this.bufGovVotes,
+      govDeposits: this.bufGovDeposits,
+      govProposals: this.bufGovProposals,
+      stakeDeleg: this.bufStakeDeleg,
+      stakeDistr: this.bufStakeDistr,
+      balanceDeltas: this.bufBalanceDeltas,
+      wasmCodes: this.bufWasmCodes,
+      wasmContracts: this.bufWasmContracts,
+      wasmMigrations: this.bufWasmMigrations,
+      wasmAdminChanges: this.bufWasmAdminChanges,
+      networkParams: this.bufNetworkParams,
+      validators: this.bufValidators,
+      validatorSet: this.bufValidatorSet,
+      missedBlocks: this.bufMissedBlocks,
+      ibcPackets: this.bufIbcPackets,
+      ibcChannels: this.bufIbcChannels,
+      ibcTransfers: this.bufIbcTransfers,
+      ibcClients: this.bufIbcClients,
+      ibcDenoms: this.bufIbcDenoms,
+      ibcConnections: this.bufIbcConnections,
+      authzGrants: this.bufAuthzGrants,
+      feeGrants: this.bufFeeGrants,
+      cw20Transfers: this.bufCw20Transfers,
+      wasmSwaps: this.bufWasmSwaps,
+      factoryTokens: this.bufFactoryTokens,
+      unknownMsgs: this.bufUnknownMsgs,
+      factorySupplyEvents: this.bufFactorySupplyEvents,
+    };
+
+    // Reset all main buffers
+    this.bufBlocks = []; this.bufTxs = []; this.bufMsgs = []; this.bufEvents = []; this.bufAttrs = []; this.bufTransfers = [];
+    this.bufFactoryDenoms = []; this.bufDexPools = []; this.bufDexSwaps = []; this.bufDexLiquidity = [];
+    this.bufWrapperSettings = []; this.bufWrapperEvents = []; this.bufWasmOracleUpdates = []; this.bufWasmTokenEvents = [];
+    this.bufWasmExec = []; this.bufWasmEvents = []; this.bufWasmEventAttrs = [];
+    this.bufGovVotes = []; this.bufGovDeposits = []; this.bufGovProposals = [];
+    this.bufStakeDeleg = []; this.bufStakeDistr = [];
+    this.bufBalanceDeltas = []; this.bufWasmCodes = []; this.bufWasmContracts = []; this.bufWasmMigrations = [];
+    this.bufWasmAdminChanges = []; this.bufNetworkParams = [];
+    this.bufValidators = []; this.bufValidatorSet = []; this.bufMissedBlocks = [];
+    this.bufIbcPackets = []; this.bufIbcChannels = []; this.bufIbcTransfers = [];
+    this.bufIbcClients = []; this.bufIbcDenoms = []; this.bufIbcConnections = [];
+    this.bufAuthzGrants = []; this.bufFeeGrants = []; this.bufCw20Transfers = [];
+    this.bufWasmSwaps = []; this.bufFactoryTokens = []; this.bufUnknownMsgs = [];
+    this.bufFactorySupplyEvents = [];
+
     const pool = getPgPool();
     const client = await pool.connect();
+
     try {
-      const heights = this.bufBlocks.map(r => r.height);
+      const heights = snapshot.blocks.map(r => r.height);
       const minH = Math.min(...heights);
       const maxH = Math.max(...heights);
 
@@ -1642,44 +1710,36 @@ export class PostgresSink implements Sink {
       await client.query('BEGIN');
 
       // 1. Standard
-      await flushBlocks(client, this.bufBlocks); this.bufBlocks = [];
-      await flushTxs(client, this.bufTxs); this.bufTxs = [];
-      await flushMsgs(client, this.bufMsgs); this.bufMsgs = [];
-      await flushEvents(client, this.bufEvents); this.bufEvents = [];
-      await flushAttrs(client, this.bufAttrs); this.bufAttrs = [];
-      await flushTransfers(client, this.bufTransfers); this.bufTransfers = [];
+      await flushBlocks(client, snapshot.blocks);
+      await flushTxs(client, snapshot.txs);
+      await flushMsgs(client, snapshot.msgs);
+      await flushEvents(client, snapshot.events);
+      await flushAttrs(client, snapshot.attrs);
+      await flushTransfers(client, snapshot.transfers);
 
       // 2. Modules (WASM & Gov)
-      await flushWasmExec(client, this.bufWasmExec); this.bufWasmExec = [];
-      await flushWasmEvents(client, this.bufWasmEvents); this.bufWasmEvents = [];
-      await flushWasmEventAttrs(client, this.bufWasmEventAttrs); this.bufWasmEventAttrs = [];
+      await flushWasmExec(client, snapshot.wasmExec);
+      await flushWasmEvents(client, snapshot.wasmEvents);
+      await flushWasmEventAttrs(client, snapshot.wasmEventAttrs);
 
-      // ✅ Flushing Gov Data
-      await flushGovVotes(client, this.bufGovVotes); this.bufGovVotes = [];
-      await flushGovDeposits(client, this.bufGovDeposits); this.bufGovDeposits = [];
-      await upsertGovProposals(client, this.bufGovProposals); this.bufGovProposals = [];
+      await flushGovVotes(client, snapshot.govVotes);
+      await flushGovDeposits(client, snapshot.govDeposits);
+      await upsertGovProposals(client, snapshot.govProposals);
 
-      // ✅ Flushing Authz/Feegrant Data
-      await flushAuthzGrants(client, this.bufAuthzGrants); this.bufAuthzGrants = [];
-      await flushFeeGrants(client, this.bufFeeGrants); this.bufFeeGrants = [];
+      await flushAuthzGrants(client, snapshot.authzGrants);
+      await flushFeeGrants(client, snapshot.feeGrants);
+      await flushCw20Transfers(client, snapshot.cw20Transfers);
 
-      // ✅ Flushing CW20 Data
-      await flushCw20Transfers(client, this.bufCw20Transfers); this.bufCw20Transfers = [];
+      await flushStakeDeleg(client, snapshot.stakeDeleg);
+      await flushStakeDistr(client, snapshot.stakeDistr);
 
-      // ✅ Flushing Staking Data
-      await flushStakeDeleg(client, this.bufStakeDeleg); this.bufStakeDeleg = [];
-      await flushStakeDistr(client, this.bufStakeDistr); this.bufStakeDistr = [];
+      await upsertValidators(client, snapshot.validators);
+      await execBatchedInsert(client, 'core.validator_set', ['height', 'operator_address', 'voting_power', 'proposer_priority'], snapshot.validatorSet, 'ON CONFLICT (height, operator_address) DO NOTHING');
+      await execBatchedInsert(client, 'core.validator_missed_blocks', ['operator_address', 'height'], snapshot.missedBlocks, 'ON CONFLICT (operator_address, height) DO NOTHING');
 
-      // ✅ Flushing Validator Data
-      await upsertValidators(client, this.bufValidators); this.bufValidators = [];
-      await execBatchedInsert(client, 'core.validator_set', ['height', 'operator_address', 'voting_power', 'proposer_priority'], this.bufValidatorSet, 'ON CONFLICT (height, operator_address) DO NOTHING');
-      this.bufValidatorSet = [];
-      await execBatchedInsert(client, 'core.validator_missed_blocks', ['operator_address', 'height'], this.bufMissedBlocks, 'ON CONFLICT (operator_address, height) DO NOTHING');
-      this.bufMissedBlocks = [];
-
-      // ✅ Flushing IBC Data
-      if (this.bufIbcPackets.length > 0) {
-        const seqs = [...this.bufIbcPackets, ...this.bufIbcTransfers]
+      // IBC Data
+      if (snapshot.ibcPackets.length > 0 || snapshot.ibcTransfers.length > 0) {
+        const seqs = [...snapshot.ibcPackets, ...snapshot.ibcTransfers]
           .map((r: any) => Number(r.sequence))
           .filter((n: number) => Number.isFinite(n));
         if (seqs.length > 0) {
@@ -1688,82 +1748,115 @@ export class PostgresSink implements Sink {
           await ensureIbcPartitions(client, minSeq, maxSeq);
         }
       }
-      await flushIbcPackets(client, this.bufIbcPackets); this.bufIbcPackets = [];
-      await flushIbcChannels(client, this.bufIbcChannels); this.bufIbcChannels = [];
-      await flushIbcTransfers(client, this.bufIbcTransfers); this.bufIbcTransfers = [];
-      await flushIbcClients(client, this.bufIbcClients); this.bufIbcClients = [];
-      await flushIbcDenoms(client, this.bufIbcDenoms); this.bufIbcDenoms = [];
-      await flushIbcConnections(client, this.bufIbcConnections); this.bufIbcConnections = [];
+      await flushIbcPackets(client, snapshot.ibcPackets);
+      await flushIbcChannels(client, snapshot.ibcChannels);
+      await flushIbcTransfers(client, snapshot.ibcTransfers);
+      await flushIbcClients(client, snapshot.ibcClients);
+      await flushIbcDenoms(client, snapshot.ibcDenoms);
+      await flushIbcConnections(client, snapshot.ibcConnections);
 
-      // ✅ ADDED: New Flushers
-      if (this.bufBalanceDeltas.length > 0) {
-        await flushBalanceDeltas(client, this.bufBalanceDeltas); this.bufBalanceDeltas = [];
+      if (snapshot.balanceDeltas.length > 0) {
+        await flushBalanceDeltas(client, snapshot.balanceDeltas);
       }
-      if (this.bufWasmCodes.length > 0 || this.bufWasmContracts.length > 0 || this.bufWasmMigrations.length > 0) {
+      if (snapshot.wasmCodes.length > 0 || snapshot.wasmContracts.length > 0 || snapshot.wasmMigrations.length > 0) {
         await flushWasmRegistry(client, {
-          codes: this.bufWasmCodes,
-          contracts: this.bufWasmContracts,
-          migrations: this.bufWasmMigrations
+          codes: snapshot.wasmCodes,
+          contracts: snapshot.wasmContracts,
+          migrations: snapshot.wasmMigrations
         });
-        this.bufWasmCodes = []; this.bufWasmContracts = []; this.bufWasmMigrations = [];
       }
-      if (this.bufWasmAdminChanges.length > 0) {
-        await flushWasmAdminChanges(client, this.bufWasmAdminChanges); this.bufWasmAdminChanges = [];
+      if (snapshot.wasmAdminChanges.length > 0) {
+        await flushWasmAdminChanges(client, snapshot.wasmAdminChanges);
       }
-      if (this.bufNetworkParams.length > 0) {
-        await flushNetworkParams(client, this.bufNetworkParams); this.bufNetworkParams = [];
-      }
-
-      // ✅ WASM DEX Swaps Analytics
-      if (this.bufWasmSwaps.length > 0) {
-        await flushWasmSwaps(client, this.bufWasmSwaps); this.bufWasmSwaps = [];
-      }
-      if (this.bufFactoryTokens.length > 0) {
-        await flushFactoryTokens(client, this.bufFactoryTokens); this.bufFactoryTokens = [];
+      if (snapshot.networkParams.length > 0) {
+        await flushNetworkParams(client, snapshot.networkParams);
       }
 
-      // ✅ Specialized WASM Analytics
-      if (this.bufWasmOracleUpdates.length > 0 || this.bufWasmTokenEvents.length > 0) {
+      // WASM Analytics
+      if (snapshot.wasmSwaps.length > 0) {
+        await flushWasmSwaps(client, snapshot.wasmSwaps);
+      }
+      if (snapshot.factoryTokens.length > 0) {
+        await flushFactoryTokens(client, snapshot.factoryTokens);
+      }
+      if (snapshot.wasmOracleUpdates.length > 0 || snapshot.wasmTokenEvents.length > 0) {
         await flushWasmAnalytics(client, {
-          oracleUpdates: this.bufWasmOracleUpdates,
-          tokenEvents: this.bufWasmTokenEvents
+          oracleUpdates: snapshot.wasmOracleUpdates,
+          tokenEvents: snapshot.wasmTokenEvents
         });
-        this.bufWasmOracleUpdates = [];
-        this.bufWasmTokenEvents = [];
       }
 
-      // ✅ Unknown Messages Quarantine
-      if (this.bufUnknownMsgs.length > 0) {
-        await flushUnknownMessages(client, this.bufUnknownMsgs);
-        this.bufUnknownMsgs = [];
+      if (snapshot.unknownMsgs.length > 0) {
+        await flushUnknownMessages(client, snapshot.unknownMsgs);
       }
 
-      // ✅ Zigchain Factory Supply Tracking
-      if (this.bufFactorySupplyEvents.length > 0) {
-        await flushFactorySupplyEvents(client, this.bufFactorySupplyEvents);
-        this.bufFactorySupplyEvents = [];
+      if (snapshot.factorySupplyEvents.length > 0) {
+        await flushFactorySupplyEvents(client, snapshot.factorySupplyEvents);
       }
 
       // 3. Zigchain
       await flushZigchainData(client, {
-        factoryDenoms: this.bufFactoryDenoms,
-        dexPools: this.bufDexPools,
-        dexSwaps: this.bufDexSwaps,
-        dexLiquidity: this.bufDexLiquidity,
-        wrapperSettings: this.bufWrapperSettings,
-        wrapperEvents: this.bufWrapperEvents
+        factoryDenoms: snapshot.factoryDenoms,
+        dexPools: snapshot.dexPools,
+        dexSwaps: snapshot.dexSwaps,
+        dexLiquidity: snapshot.dexLiquidity,
+        wrapperSettings: snapshot.wrapperSettings,
+        wrapperEvents: snapshot.wrapperEvents
       });
-      this.bufFactoryDenoms = [];
-      this.bufDexPools = [];
-      this.bufDexSwaps = [];
-      this.bufDexLiquidity = [];
-      this.bufWrapperSettings = [];
-      this.bufWrapperEvents = [];
 
       await upsertProgress(client, this.cfg.pg?.progressId ?? 'default', maxH);
       await client.query('COMMIT');
     } catch (e) {
+      log.error(`[flush-error] rollback initiated: ${String(e)}`);
       await client.query('ROLLBACK');
+
+      // ❌ RESTORE BUFFERS ON FAILURE
+      // We prepend the snapshot data to the current buffers so they are included in the next retry.
+      this.bufBlocks = [...snapshot.blocks, ...this.bufBlocks];
+      this.bufTxs = [...snapshot.txs, ...this.bufTxs];
+      this.bufMsgs = [...snapshot.msgs, ...this.bufMsgs];
+      this.bufEvents = [...snapshot.events, ...this.bufEvents];
+      this.bufAttrs = [...snapshot.attrs, ...this.bufAttrs];
+      this.bufTransfers = [...snapshot.transfers, ...this.bufTransfers];
+      this.bufFactoryDenoms = [...snapshot.factoryDenoms, ...this.bufFactoryDenoms];
+      this.bufDexPools = [...snapshot.dexPools, ...this.bufDexPools];
+      this.bufDexSwaps = [...snapshot.dexSwaps, ...this.bufDexSwaps];
+      this.bufDexLiquidity = [...snapshot.dexLiquidity, ...this.bufDexLiquidity];
+      this.bufWrapperSettings = [...snapshot.wrapperSettings, ...this.bufWrapperSettings];
+      this.bufWrapperEvents = [...snapshot.wrapperEvents, ...this.bufWrapperEvents];
+      this.bufWasmOracleUpdates = [...snapshot.wasmOracleUpdates, ...this.bufWasmOracleUpdates];
+      this.bufWasmTokenEvents = [...snapshot.wasmTokenEvents, ...this.bufWasmTokenEvents];
+      this.bufWasmExec = [...snapshot.wasmExec, ...this.bufWasmExec];
+      this.bufWasmEvents = [...snapshot.wasmEvents, ...this.bufWasmEvents];
+      this.bufWasmEventAttrs = [...snapshot.wasmEventAttrs, ...this.bufWasmEventAttrs];
+      this.bufGovVotes = [...snapshot.govVotes, ...this.bufGovVotes];
+      this.bufGovDeposits = [...snapshot.govDeposits, ...this.bufGovDeposits];
+      this.bufGovProposals = [...snapshot.govProposals, ...this.bufGovProposals];
+      this.bufStakeDeleg = [...snapshot.stakeDeleg, ...this.bufStakeDeleg];
+      this.bufStakeDistr = [...snapshot.stakeDistr, ...this.bufStakeDistr];
+      this.bufBalanceDeltas = [...snapshot.balanceDeltas, ...this.bufBalanceDeltas];
+      this.bufWasmCodes = [...snapshot.wasmCodes, ...this.bufWasmCodes];
+      this.bufWasmContracts = [...snapshot.wasmContracts, ...this.bufWasmContracts];
+      this.bufWasmMigrations = [...snapshot.wasmMigrations, ...this.bufWasmMigrations];
+      this.bufWasmAdminChanges = [...snapshot.wasmAdminChanges, ...this.bufWasmAdminChanges];
+      this.bufNetworkParams = [...snapshot.networkParams, ...this.bufNetworkParams];
+      this.bufValidators = [...snapshot.validators, ...this.bufValidators];
+      this.bufValidatorSet = [...snapshot.validatorSet, ...this.bufValidatorSet];
+      this.bufMissedBlocks = [...snapshot.missedBlocks, ...this.bufMissedBlocks];
+      this.bufIbcPackets = [...snapshot.ibcPackets, ...this.bufIbcPackets];
+      this.bufIbcChannels = [...snapshot.ibcChannels, ...this.bufIbcChannels];
+      this.bufIbcTransfers = [...snapshot.ibcTransfers, ...this.bufIbcTransfers];
+      this.bufIbcClients = [...snapshot.ibcClients, ...this.bufIbcClients];
+      this.bufIbcDenoms = [...snapshot.ibcDenoms, ...this.bufIbcDenoms];
+      this.bufIbcConnections = [...snapshot.ibcConnections, ...this.bufIbcConnections];
+      this.bufAuthzGrants = [...snapshot.authzGrants, ...this.bufAuthzGrants];
+      this.bufFeeGrants = [...snapshot.feeGrants, ...this.bufFeeGrants];
+      this.bufCw20Transfers = [...snapshot.cw20Transfers, ...this.bufCw20Transfers];
+      this.bufWasmSwaps = [...snapshot.wasmSwaps, ...this.bufWasmSwaps];
+      this.bufFactoryTokens = [...snapshot.factoryTokens, ...this.bufFactoryTokens];
+      this.bufUnknownMsgs = [...snapshot.unknownMsgs, ...this.bufUnknownMsgs];
+      this.bufFactorySupplyEvents = [...snapshot.factorySupplyEvents, ...this.bufFactorySupplyEvents];
+
       throw e;
     } finally {
       client.release();
