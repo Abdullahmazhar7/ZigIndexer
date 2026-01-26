@@ -210,7 +210,7 @@ CREATE TABLE stake.distribution_events (
 CREATE TABLE gov.proposals (
     proposal_id   BIGINT PRIMARY KEY,
     submitter     TEXT NULL,
-    title         TEXT NOT NULL,
+    title         TEXT NULL,
     summary       TEXT NULL,
     proposal_type TEXT NULL,
     status        proposal_status NOT NULL,

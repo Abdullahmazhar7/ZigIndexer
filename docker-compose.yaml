@@ -21,7 +21,7 @@ services:
     volumes:
       # ✅ STORAGE CONFIG: Changed to "../indexer-data" to keep data OUTSIDE the project folder.
       # This fixes the Docker build error by preventing Docker from scanning the locked database files.
-      - ../indexer-data:/var/lib/postgresql/data
+      - ../indexer-data:/var/lib/postgresql
       
     shm_size: 8gb  # ✅ Increased from 1gb for 5.4M+ scale
     command: 

@@ -288,34 +288,7 @@ export class PostgresSink implements Sink {
     const validatorSetRows: any[] = [];
     const missedBlocksRows: any[] = [];
 
-    const vSet = blockLine.validator_set;
-    if (vSet?.validators) {
-      for (const v of vSet.validators as any[]) {
-        validatorSetRows.push({
-          height,
-          operator_address: v.address,
-          voting_power: v.voting_power,
-          proposer_priority: v.proposer_priority
-        });
-      }
-    }
-
-    // Missed blocks: look at current block signatures for height-1
-    const signatures = b?.block?.last_commit?.signatures;
-    if (Array.isArray(signatures)) {
-      for (const sig of signatures) {
-        // block_id_flag: 1 = BLOCK_ID_FLAG_ABSENT, 2 = COMMIT, 3 = NIL
-        const isAbsent = sig.block_id_flag === 1 || sig.block_id_flag === 'BLOCK_ID_FLAG_ABSENT';
-        if (isAbsent && sig.validator_address) {
-          missedBlocksRows.push({
-            operator_address: sig.validator_address,
-            height: height - 1
-          });
-          log.debug(`[uptime] missed block: ${sig.validator_address} at height ${height - 1}`);
-        }
-      }
-    }
-
+    // ✅ Define ALL row arrays at the top to fix scope issues
     const txRows: any[] = [];
     const msgRows: any[] = [];
     const evRows: any[] = [];
@@ -379,6 +352,61 @@ export class PostgresSink implements Sink {
     const wrapperEventsRows: any[] = [];
     const wasmOracleUpdatesRows: any[] = [];
     const wasmTokenEventsRows: any[] = [];
+
+    const vSet = blockLine.validator_set;
+    if (vSet?.validators) {
+      for (const v of vSet.validators as any[]) {
+        validatorSetRows.push({
+          height,
+          operator_address: v.address,
+          voting_power: v.voting_power,
+          proposer_priority: v.proposer_priority
+        });
+      }
+    }
+
+    // ✅ GOVERNANCE: Process EndBlock Events for Timestamps
+    // Timestamps like voting_end_time are often only found in EndBlock events, not in transactions.
+    const endEvents = blockLine.block_results?.end_block_events ?? [];
+    for (const ev of endEvents) {
+      if (ev.type === 'active_proposal' || ev.type === 'proposal_deposit' || ev.type === 'proposal_vote' || ev.type === 'inactive_proposal') {
+        const attrs = attrsToPairs(ev.attributes);
+        const pid = findAttr(attrs, 'proposal_id');
+        if (pid) {
+          const votingStart = toDateFromTimestamp(findAttr(attrs, 'voting_period_start') || findAttr(attrs, 'voting_start_time'));
+          const votingEnd = toDateFromTimestamp(findAttr(attrs, 'voting_period_end') || findAttr(attrs, 'voting_end_time'));
+          const depositEnd = toDateFromTimestamp(findAttr(attrs, 'deposit_end_time'));
+
+          if (votingStart || votingEnd || depositEnd) {
+            govProposalsRows.push({
+              proposal_id: pid,
+              // If we see voting timestamps, it's definitely in voting period or passed it
+              status: (votingEnd && votingEnd < time) ? 'passed' : (votingStart ? 'voting_period' : undefined),
+              voting_start: votingStart,
+              voting_end: votingEnd,
+              deposit_end: depositEnd
+            } as any);
+          }
+        }
+      }
+    }
+
+    // Missed blocks: look at current block signatures for height-1
+    const signatures = b?.block?.last_commit?.signatures;
+    if (Array.isArray(signatures)) {
+      for (const sig of signatures) {
+        // block_id_flag: 1 = BLOCK_ID_FLAG_ABSENT, 2 = COMMIT, 3 = NIL
+        const isAbsent = sig.block_id_flag === 1 || sig.block_id_flag === 'BLOCK_ID_FLAG_ABSENT';
+        if (isAbsent && sig.validator_address) {
+          missedBlocksRows.push({
+            operator_address: sig.validator_address,
+            height: height - 1
+          });
+          log.debug(`[uptime] missed block: ${sig.validator_address} at height ${height - 1}`);
+        }
+      }
+    }
+
 
     const txs = Array.isArray(blockLine?.txs) ? blockLine.txs : [];
 
@@ -460,12 +488,19 @@ export class PostgresSink implements Sink {
           for (const opt of options) {
             govVotesRows.push({
               proposal_id: m.proposal_id,
-              voter: m.voter,
+              voter: m.voter || m.signer || firstSigner,
               option: opt.option?.toString() ?? 'VOTE_OPTION_UNSPECIFIED',
               weight: opt.weight ?? '1.0', // Weight is a decimal string like "0.5"
               height,
               tx_hash
             });
+          }
+          // ✅ ENHANCEMENT: Any vote implies the proposal is in voting period
+          if (m.proposal_id) {
+            govProposalsRows.push({
+              proposal_id: m.proposal_id,
+              status: 'voting_period'
+            } as any);
           }
         }
 
@@ -476,12 +511,23 @@ export class PostgresSink implements Sink {
             if (!coin) continue;
             govDepositsRows.push({
               proposal_id: m.proposal_id,
-              depositor: m.depositor,
+              depositor: m.depositor || m.signer || firstSigner,
               amount: coin.amount,
               denom: coin.denom,
               height,
               tx_hash
             });
+          }
+
+          // ✅ ENHANCEMENT: Check if deposit triggers voting period
+          const activeEv = msgLog?.events.find((e: any) => e.type === 'proposal_deposit' || e.type === 'active_proposal');
+          const vsAt = findAttr(attrsToPairs(activeEv?.attributes), 'voting_period_start');
+          if (vsAt && m.proposal_id) {
+            govProposalsRows.push({
+              proposal_id: m.proposal_id,
+              status: 'voting_period',
+              voting_start: toDateFromTimestamp(vsAt),
+            } as any);
           }
         }
 
@@ -491,22 +537,40 @@ export class PostgresSink implements Sink {
           const pid = findAttr(attrsToPairs(event?.attributes), 'proposal_id');
 
           if (pid) {
-            // ✅ FIX: Extract submitter and proposal_type
             const submitter = m.proposer || m.signer || firstSigner;
-            // v1beta1 uses content.@type, v1 uses messages array
             const proposalType = m.content?.['@type'] ??
-              (Array.isArray(m.messages) && m.messages[0]?.['@type']) ??
+              m.content?.type_url ??
+              (Array.isArray(m.messages) && (m.messages[0]?.['@type'] ?? m.messages[0]?.type_url)) ??
               findAttr(attrsToPairs(event?.attributes), 'proposal_type') ??
+              findAttr(attrsToPairs(event?.attributes), 'proposal_messages')?.split(',').filter(Boolean).pop() ??
               null;
+
+            // ✅ EXTRACTION: Initial Deposit
+            const initialDeposit = m.initial_deposit ?? m.initialDeposit ?? null;
+
+            // ✅ EXTRACTION: Changes (for Param Changes or legacy content)
+            const content = m.content || (Array.isArray(m.messages) ? m.messages[0] : null);
+            const changes = content?.params ?? content?.changes ?? content?.plan ?? content?.msg ?? content?.msgs ?? null;
+
+            // ✅ EXTRACTION: Timestamps from events (accurate vs block time)
+            const attrs = attrsToPairs(event?.attributes);
+            const depositEnd = toDateFromTimestamp(findAttr(attrs, 'deposit_end_time'));
+            const votingStart = toDateFromTimestamp(findAttr(attrs, 'voting_period_start') || findAttr(attrs, 'voting_start_time'));
+            const votingEnd = toDateFromTimestamp(findAttr(attrs, 'voting_period_end') || findAttr(attrs, 'voting_end_time'));
 
             govProposalsRows.push({
               proposal_id: pid,
               submitter,
-              title: m.content?.title ?? m.title ?? '',
-              summary: m.content?.description ?? m.summary ?? '',
+              title: m.content?.title ?? m.title ?? content?.title ?? '',
+              summary: m.content?.description ?? m.summary ?? content?.description ?? '',
               proposal_type: proposalType,
               submit_time: time,
-              status: 'deposit_period',
+              status: votingStart ? 'voting_period' : 'deposit_period',
+              deposit_end: depositEnd,
+              voting_start: votingStart,
+              voting_end: votingEnd,
+              total_deposit: initialDeposit,
+              changes: changes,
             });
           }
         }
