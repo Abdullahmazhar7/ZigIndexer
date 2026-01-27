@@ -27,19 +27,19 @@ services:
     command: 
       - "postgres"
       - "-c"
-      - "max_wal_size=8GB"  # ✅ Increased from 4GB
+      - "max_wal_size=16GB"  # ✅ Increased from 4GB
       - "-c"
       - "min_wal_size=2GB"  # ✅ Increased from 1GB
       - "-c"
       - "checkpoint_timeout=15min"  # ✅ Increased from 10min
       - "-c"
-      - "shared_buffers=4096MB"  # ✅ Increased from 1024MB
+      - "shared_buffers=16GB"  # ✅ Increased from 1024MB
       - "-c"
-      - "work_mem=128MB"  # ✅ Increased from 64MB
+      - "work_mem=512MB"  # ✅ Increased from 64MB
       - "-c"
       - "maintenance_work_mem=1GB"  # ✅ Added for faster VACUUM/INDEX
       - "-c"
-      - "effective_cache_size=8GB"  # ✅ Added for query planning
+      - "effective_cache_size=16GB"  # ✅ Added for query planning
       - "-c"
       - "archive_mode=off"  # ✅ STOPS THE LOG WARNINGS/spamming
       # ✅ Autovacuum throttling (prevents crash during high ingestion)

@@ -61,7 +61,7 @@ async function main() {
   const protoDir = process.env.PROTO_DIR || path.join(process.cwd(), 'protos');
   log.info(`[proto] dir = ${protoDir}`);
 
-  const poolSize = Math.max(1, Math.min(cfg.concurrency ?? 8, 8));
+  const poolSize = Math.max(1, Math.min(cfg.concurrency ?? 12, 12));
   const decodePool = createTxDecodePool(poolSize, { protoDir });
 
   const sink = createSink({
