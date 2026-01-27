@@ -529,6 +529,7 @@ CREATE TABLE core.network_params (
     new_value JSONB       NOT NULL,
     PRIMARY KEY (height, module, param_key)
 ) PARTITION BY RANGE (height);
+CREATE TABLE IF NOT EXISTS core.network_params_p0 PARTITION OF core.network_params FOR VALUES FROM (0) TO (1000000);
 
 -- ============================================================================
 -- 10) QUERY-PATTERN INDEXES (For 5.4M+ scale)
