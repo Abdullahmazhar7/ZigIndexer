@@ -455,13 +455,7 @@ CREATE TABLE IF NOT EXISTS wasm.admin_changes (
 ) PARTITION BY RANGE (height);
 CREATE TABLE IF NOT EXISTS wasm.admin_changes_p0 PARTITION OF wasm.admin_changes FOR VALUES FROM (0) TO (1000000);
 
-CREATE TABLE wasm.state_kv (
-    contract   TEXT   NOT NULL,
-    key        BYTEA  NOT NULL,
-    height     BIGINT NOT NULL,
-    value      BYTEA  NOT NULL,
-    PRIMARY KEY (contract, key, height)
-) PARTITION BY RANGE (height);
+
 
 -- ============================================================================
 -- 7) AUTHZ / FEEGRANT

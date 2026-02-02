@@ -22,7 +22,7 @@ INSERT INTO util.height_part_ranges (schema_name, table_name, range_size) VALUES
  ('authz_feegrant', 'authz_grants', 1000000), ('authz_feegrant', 'fee_grants', 1000000),
  ('tokens', 'cw20_transfers', 1000000),
  ('wasm', 'executions', 1000000), ('wasm', 'events', 1000000),
- ('wasm', 'event_attrs', 1000000), ('wasm', 'state_kv', 1000000), ('wasm', 'contract_migrations', 1000000),
+ ('wasm', 'event_attrs', 1000000), ('wasm', 'contract_migrations', 1000000),
  ('wasm', 'dex_swaps', 1000000), ('wasm', 'admin_changes', 1000000),
  -- IBC: No longer partitioned (lifecycle merging requires simple PK)
  ('zigchain', 'dex_swaps', 1000000), ('zigchain', 'dex_liquidity', 1000000)
@@ -40,7 +40,7 @@ WHERE (schema_name, table_name) NOT IN (
     ('authz_feegrant', 'authz_grants'), ('authz_feegrant', 'fee_grants'),
     ('tokens', 'cw20_transfers'),
     ('wasm', 'executions'), ('wasm', 'events'), ('wasm', 'event_attrs'),
-    ('wasm', 'state_kv'), ('wasm', 'contract_migrations'),
+    ('wasm', 'contract_migrations'),
     ('wasm', 'dex_swaps'), ('wasm', 'admin_changes'),
     ('zigchain', 'dex_swaps'), ('zigchain', 'dex_liquidity')
 );
