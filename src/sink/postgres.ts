@@ -932,6 +932,26 @@ export class PostgresSink implements Sink {
             attributes: attrsPairs, height
           });
 
+          // 🟢 CATCH-ALL CONTRACT INSTANTIATION (Factory/Internal) 🟢
+          if (event_type === 'instantiate') {
+            const contract = findAttr(attrsPairs, '_contract_address') || findAttr(attrsPairs, 'contract_address');
+            const codeId = findAttr(attrsPairs, 'code_id');
+            const creator = findAttr(attrsPairs, 'creator');
+            const admin = findAttr(attrsPairs, 'admin');
+
+            if (contract && codeId) {
+              wasmContractsRows.push({
+                address: contract,
+                code_id: toBigIntStr(codeId),
+                creator: creator || firstSigner, // Fallback to tx signer
+                admin: admin || null,
+                label: null, // Internal instantiations rarely have labels in events
+                created_height: height,
+                created_tx_hash: tx_hash
+              });
+            }
+          }
+
           if (event_type === 'wasm') {
             const contract = findAttr(attrsPairs, 'contract_address') || findAttr(attrsPairs, '_contract_address');
             if (contract) {

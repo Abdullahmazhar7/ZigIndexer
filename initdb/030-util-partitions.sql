@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS util.height_part_ranges (
 -- Configuration: 1 Million blocks per partition
 INSERT INTO util.height_part_ranges (schema_name, table_name, range_size) VALUES
  ('core', 'blocks', 1000000), ('core', 'transactions', 1000000), ('core', 'messages', 1000000),
+ ('core', 'events', 100000), -- ✅ 1 lakh blocks for easier archival
  ('core', 'validator_set', 1000000), ('core', 'validator_missed_blocks', 1000000),
  ('core', 'network_params', 1000000), ('core', 'event_attrs', 100000),
  ('bank', 'transfers', 1000000), ('bank', 'balance_deltas', 1000000),

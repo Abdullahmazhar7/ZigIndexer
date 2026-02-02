@@ -42,7 +42,7 @@ export async function insertEvents(client: PoolClient, rows: any[]): Promise<voi
         'core.events',
         cols,
         safeRows,
-        'ON CONFLICT (tx_hash, msg_index, event_index) DO NOTHING',
+        'ON CONFLICT (height, tx_hash, msg_index, event_index) DO NOTHING',
         { attributes: 'jsonb' }
     );
 }
